@@ -400,13 +400,15 @@ func (s *Store) Query(kindName string, filters map[string]string, since, until t
 	if k == nil {
 		return Page{}, fmt.Errorf("unknown log kind")
 	}
-	k.mu.RLock()
-	all := k.ordered()
-	k.mu.RUnlock()
 	page := Page{Items: []json.RawMessage{}}
 	var lastSeq int64
-	for i := len(all) - 1; i >= 0; i-- {
-		r := all[i]
+	// walk the ring newest first under the read lock: records are immutable,
+	// so nothing is copied (the ring can hold 50k)
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	n := len(k.ring)
+	for i := n - 1; i >= 0; i-- {
+		r := &k.ring[(k.head+i)%n]
 		if cursor > 0 && r.seq >= cursor {
 			continue
 		}

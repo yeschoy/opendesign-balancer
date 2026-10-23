@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 
 	"opendesign-balancer/internal/config"
 )
@@ -18,11 +19,22 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`__Secure-better-auth\.session_token=[^;\s"]+`),
 }
 
-// redactSecrets replaces every known account key and proxy URL and every
-// credential-looking token in text.
-func redactSecrets(cfg *config.Config, text string) string {
-	if text == "" {
-		return text
+// secretHints are cheap substrings: a text with none of them (case-folded)
+// can't match any secretPatterns entry, so the regexes are skipped.
+var secretHints = []string{"bearer", "sk-", "vela_ctrl_", "://", "__secure-better-auth"}
+
+type replacerCache struct {
+	cfg *config.Config
+	r   *strings.Replacer // nil: no account secrets to replace
+}
+
+var lastReplacer atomic.Pointer[replacerCache]
+
+// accountReplacer is the replacer for cfg's account secrets, rebuilt only
+// when the config snapshot changes.
+func accountReplacer(cfg *config.Config) *strings.Replacer {
+	if c := lastReplacer.Load(); c != nil && c.cfg == cfg {
+		return c.r
 	}
 	var pairs []string
 	for _, a := range cfg.Accounts {
@@ -32,11 +44,31 @@ func redactSecrets(cfg *config.Config, text string) string {
 			}
 		}
 	}
+	c := &replacerCache{cfg: cfg}
 	if len(pairs) > 0 {
-		text = strings.NewReplacer(pairs...).Replace(text)
+		c.r = strings.NewReplacer(pairs...)
 	}
-	for _, re := range secretPatterns {
-		text = re.ReplaceAllString(text, "[REDACTED]")
+	lastReplacer.Store(c)
+	return c.r
+}
+
+// redactSecrets replaces every known account key and proxy URL and every
+// credential-looking token in text.
+func redactSecrets(cfg *config.Config, text string) string {
+	if text == "" {
+		return text
+	}
+	if r := accountReplacer(cfg); r != nil {
+		text = r.Replace(text)
+	}
+	lower := strings.ToLower(text)
+	for _, h := range secretHints {
+		if strings.Contains(lower, h) {
+			for _, re := range secretPatterns {
+				text = re.ReplaceAllString(text, "[REDACTED]")
+			}
+			break
+		}
 	}
 	return text
 }

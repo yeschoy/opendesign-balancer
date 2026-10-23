@@ -671,3 +671,22 @@ func TestClientClosingAfterDoneIsNotCancelled(t *testing.T) {
 		t.Fatalf("log = %v", logs)
 	}
 }
+
+func TestRequestLogCarriesCacheRateAndCost(t *testing.T) {
+	e := newEnv(t, []config.Account{{ID: "a"}}, nil)
+	// writeOK reports 11 prompt tokens (5 cached) and 3 completion tokens
+	readAll(e.post("/v1/chat/completions", map[string]any{"model": "claude-opus-5", "messages": []any{map[string]any{"role": "user", "content": "x"}}}, nil))
+	readAll(e.post("/v1/chat/completions", map[string]any{"model": "unpriced-model", "messages": []any{map[string]any{"role": "user", "content": "y"}}}, nil))
+	byModel := map[string]map[string]any{}
+	for _, l := range e.requestLogs() {
+		byModel[l["model"].(string)] = l
+	}
+	l := byModel["claude-opus-5"]
+	want := (6*5 + 5*0.5 + 3*25) / 1e6
+	if l["currency"] != "USD" || l["cacheRate"].(float64) != 5.0/11 || l["cost"].(float64)-want > 1e-12 || want-l["cost"].(float64) > 1e-12 {
+		t.Fatalf("priced log = %v", l)
+	}
+	if u := byModel["unpriced-model"]; u["cost"] != nil || u["cacheRate"] == nil {
+		t.Fatalf("unpriced log = %v", u)
+	}
+}

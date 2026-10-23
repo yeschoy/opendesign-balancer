@@ -8,14 +8,16 @@ import (
 )
 
 type Bucket struct {
-	Minute    int64 `json:"m"`
-	Requests  int64 `json:"r"`
-	Success   int64 `json:"s"`
-	Failed    int64 `json:"f"`
-	Cancelled int64 `json:"c"`
-	Input     int64 `json:"i"`
-	Output    int64 `json:"o"`
-	Cached    int64 `json:"k"`
+	Minute    int64   `json:"m"`
+	Requests  int64   `json:"r"`
+	Success   int64   `json:"s"`
+	Failed    int64   `json:"f"`
+	Cancelled int64   `json:"c"`
+	Input     int64   `json:"i"`
+	Output    int64   `json:"o"`
+	Cached    int64   `json:"k"`
+	CostCNY   float64 `json:"cc,omitempty"`
+	CostUSD   float64 `json:"cu,omitempty"`
 }
 
 func (b *Bucket) add(o Bucket) {
@@ -26,6 +28,8 @@ func (b *Bucket) add(o Bucket) {
 	b.Input += o.Input
 	b.Output += o.Output
 	b.Cached += o.Cached
+	b.CostCNY += o.CostCNY
+	b.CostUSD += o.CostUSD
 }
 
 type ring [1440]Bucket
@@ -48,7 +52,7 @@ type Stats struct {
 func New() *Stats { return &Stats{account: map[string]*ring{}, now: time.Now} }
 
 // Record adds one finished request. result is success | failed | client_cancelled.
-func (s *Stats) Record(accountID, result string, input, output, cached *int64) {
+func (s *Stats) Record(accountID, result string, input, output, cached *int64, currency string, cost float64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.now().Unix() / 60
@@ -60,6 +64,12 @@ func (s *Stats) Record(accountID, result string, input, output, cached *int64) {
 		d.Cancelled = 1
 	default:
 		d.Failed = 1
+	}
+	switch currency {
+	case "CNY":
+		d.CostCNY = cost
+	case "USD":
+		d.CostUSD = cost
 	}
 	for _, x := range []struct {
 		p   *int64

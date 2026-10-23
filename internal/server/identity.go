@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -249,4 +250,168 @@ func stableConversation(body map[string]any) string {
 	}
 	out, _ := json.Marshal([2]string{clip(sys, 4096), clip(user, 4096)})
 	return string(out)
+}
+
+// bodyKeysKept are the top-level fields identity and routing read; the rest
+// of a request body (tools, the long message history) is never decoded.
+var bodyKeysKept = map[string]bool{"model": true, "stream": true, "previous_response_id": true, "prompt_cache_key": true,
+	"session_id": true, "conversation_id": true, "thread_id": true, "metadata": true, "system": true, "instructions": true}
+
+// parseRequestBody decodes just what routing needs from a request body: the
+// fields in bodyKeysKept, plus the leading messages/input items up to the
+// first system and first user message (what stableConversation reads).
+// The rest is only skipped over, not decoded, so a long history costs a scan
+// and no allocations. Only the decoded parts are validated; a malformed
+// remainder is left for the upstream to reject.
+func parseRequestBody(b []byte) (map[string]any, error) {
+	errBad := errors.New("not a JSON object")
+	i := skipSpace(b, 0)
+	if i >= len(b) || b[i] != '{' {
+		return nil, errBad
+	}
+	obj := make(map[string]any, len(bodyKeysKept)+2)
+	i = skipSpace(b, i+1)
+	for i < len(b) && b[i] != '}' {
+		if b[i] != '"' {
+			return nil, errBad
+		}
+		ke := skipString(b, i)
+		if ke < 0 {
+			return nil, errBad
+		}
+		var key string
+		if json.Unmarshal(b[i:ke], &key) != nil {
+			return nil, errBad
+		}
+		i = skipSpace(b, ke)
+		if i >= len(b) || b[i] != ':' {
+			return nil, errBad
+		}
+		vs := skipSpace(b, i+1)
+		ve := skipValue(b, vs)
+		if ve < 0 {
+			return nil, errBad
+		}
+		switch {
+		case bodyKeysKept[key]:
+			var x any
+			if json.Unmarshal(b[vs:ve], &x) != nil {
+				return nil, errBad
+			}
+			obj[key] = x
+		case key == "messages" || key == "input":
+			obj[key] = leadingItems(b[vs:ve])
+		}
+		i = skipSpace(b, ve)
+		if i < len(b) && b[i] == ',' {
+			i = skipSpace(b, i+1)
+		} else if i >= len(b) || b[i] != '}' {
+			return nil, errBad
+		}
+	}
+	if i >= len(b) {
+		return nil, errBad
+	}
+	return obj, nil
+}
+
+// leadingItems decodes a messages/input value: a string stays one, an array
+// is decoded item by item until a system/developer and a user item are found.
+func leadingItems(v []byte) any {
+	if len(v) == 0 {
+		return nil
+	}
+	if v[0] == '"' {
+		var s string
+		_ = json.Unmarshal(v, &s)
+		return s
+	}
+	if v[0] != '[' {
+		return nil
+	}
+	out := make([]any, 0, 4)
+	var sys, user bool
+	i := skipSpace(v, 1)
+	for i < len(v) && v[i] != ']' {
+		e := skipValue(v, i)
+		if e < 0 {
+			break
+		}
+		var x any
+		if json.Unmarshal(v[i:e], &x) == nil {
+			out = append(out, x)
+			if m, ok := x.(map[string]any); ok {
+				switch m["role"] {
+				case "system", "developer":
+					sys = sys || contentText(m["content"]) != ""
+				case "user":
+					user = user || contentText(m["content"]) != ""
+				}
+			}
+		}
+		if sys && user {
+			break
+		}
+		i = skipSpace(v, e)
+		if i < len(v) && v[i] == ',' {
+			i = skipSpace(v, i+1)
+		}
+	}
+	return out
+}
+
+func skipSpace(b []byte, i int) int {
+	for i < len(b) && (b[i] == ' ' || b[i] == '\n' || b[i] == '\t' || b[i] == '\r') {
+		i++
+	}
+	return i
+}
+
+// skipString returns the index after the string starting at b[i] == '"', or -1.
+func skipString(b []byte, i int) int {
+	for j := i + 1; j < len(b); j++ {
+		switch b[j] {
+		case '\\':
+			j++
+		case '"':
+			return j + 1
+		}
+	}
+	return -1
+}
+
+// skipValue returns the index after the JSON value starting at b[i], or -1.
+func skipValue(b []byte, i int) int {
+	if i >= len(b) {
+		return -1
+	}
+	switch b[i] {
+	case '"':
+		return skipString(b, i)
+	case '{', '[':
+		depth := 0
+		for j := i; j < len(b); j++ {
+			switch b[j] {
+			case '"':
+				if j = skipString(b, j) - 1; j < 0 {
+					return -1
+				}
+			case '{', '[':
+				depth++
+			case '}', ']':
+				if depth--; depth == 0 {
+					return j + 1
+				}
+			}
+		}
+		return -1
+	}
+	j := i
+	for j < len(b) && b[j] != ',' && b[j] != '}' && b[j] != ']' && b[j] != ' ' && b[j] != '\n' && b[j] != '\t' && b[j] != '\r' {
+		j++
+	}
+	if j == i {
+		return -1
+	}
+	return j
 }

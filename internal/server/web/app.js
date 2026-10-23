@@ -193,6 +193,7 @@ async function loadOverview() {
     ...o.windows.map((w) => [`${fmtDur(w.durationSeconds)}窗口剩余`, num(w.remaining), `共 ${num(w.limit)} · ${w.workspaces} 个工作区 · 已用 ${w.limit ? (w.used / w.limit * 100).toFixed(1) : 0}%`]),
     ['钱包合计', '$' + o.walletUsd.toFixed(2), `${o.walletAccounts} 个工作区`],
     ['24h 请求', num(st.r), `成功率 ${okRate === null ? '—' : pct(okRate)} · 近 1h ${num(o.stats.lastHour.r)}`],
+    ['24h 费用', [st.cc ? money(st.cc, 'CNY') : '', st.cu ? money(st.cu, 'USD') : ''].filter(Boolean).join(' + ') || '—', '按“路由设置”里的模型价格估算；无价格或无用量的请求不计'],
     ['24h Token', num(st.i + st.o), `输入 ${num(st.i)} · 输出 ${num(st.o)} · 缓存 ${num(st.k)}`],
     ['会话绑定', num(o.bindings), `策略 ${o.strategy}`],
   ];
@@ -778,6 +779,34 @@ async function editRule(kind, arr, idx) {
     } }] });
 }
 
+// ---- model prices ----
+let priceRows = [];
+const PRICE_COLS = [['model', 'text', 22], ['currency', 'cur'], ['input', 'n'], ['cachedInput', 'n'], ['output', 'n'], ['peakMultiplier', 'n'], ['from', 'text', 10],
+  ['longThreshold', 'n'], ['longInput', 'n'], ['longCachedInput', 'n'], ['longOutput', 'n'], ['note', 'text', 24]];
+function renderPrices() {
+  $('#price-table tbody').innerHTML = priceRows.map((e, i) => '<tr>' + PRICE_COLS.map(([k, t, w]) => {
+    const v = e[k] === undefined || e[k] === 0 && t === 'n' ? '' : e[k];
+    if (t === 'cur') return `<td><select data-i="${i}" data-f="${k}">${['CNY', 'USD'].map((c) => `<option ${c === e[k] ? 'selected' : ''}>${c}</option>`).join('')}</select></td>`;
+    return `<td><input data-i="${i}" data-f="${k}" value="${esc(v)}" ${t === 'n' ? 'type="number" step="any" min="0" size="7"' : `size="${w}"`}></td>`;
+  }).join('') + `<td><button class="btn ghost small" data-del="${i}">删除</button></td></tr>`).join('');
+}
+function readPricing() {
+  const num0 = (v) => (v === undefined || v === '' ? 0 : Number(v));
+  const models = priceRows.map((e) => {
+    const o = { model: String(e.model || '').trim(), currency: e.currency || 'USD' };
+    for (const k of ['input', 'cachedInput', 'output', 'peakMultiplier', 'longThreshold', 'longInput', 'longCachedInput', 'longOutput']) o[k] = num0(e[k]);
+    if (e.from) o.from = String(e.from).trim();
+    if (e.note) o.note = e.note;
+    return o;
+  });
+  const holidays = $('#price-holidays').value.split(/[\s,，]+/).filter(Boolean);
+  return { models, holidays };
+}
+$('#price-table').addEventListener('input', (ev) => { const t = ev.target; if (t.dataset.f) priceRows[+t.dataset.i][t.dataset.f] = t.value; });
+$('#price-table').addEventListener('click', (ev) => { const b = ev.target.closest('button[data-del]'); if (b) { priceRows.splice(+b.dataset.del, 1); renderPrices(); } });
+$('#btn-add-price').addEventListener('click', () => { priceRows.unshift({ model: '', currency: 'USD', input: 0, cachedInput: 0, output: 0 }); renderPrices(); });
+$('#btn-default-pricing').addEventListener('click', () => { priceRows = clone(settingsCache.defaults.pricing); renderPrices(); toast('已填入默认价格，保存后生效'); });
+
 async function loadSettings() {
   settingsCache = await api('GET', '/api/settings');
   const s = settingsCache.settings;
@@ -788,6 +817,9 @@ async function loadSettings() {
   errRules = clone(s.errorRules || []);
   retRules = clone(s.retryRules || []);
   renderRules();
+  priceRows = clone(s.pricing.models || []);
+  $('#price-holidays').value = (s.pricing.holidays || []).join(', ');
+  renderPrices();
   $('#set-rev').textContent = '配置版本 ' + s.revision;
   const ov = await api('GET', '/api/overview');
   $('#pv-group').innerHTML = (ov.groups.length ? ov.groups : ['default']).map((g) => `<option>${esc(g)}</option>`).join('');
@@ -795,7 +827,7 @@ async function loadSettings() {
 $('#btn-save-settings').addEventListener('click', async () => {
   const s = settingsCache.settings;
   const errorRules = errRules, retryRules = retRules;
-  const body = { revision: s.revision, upstream: s.upstream, routing: readForm(ROUTING_FIELDS, 'rt', s.routing), quota: readForm(QUOTA_FIELDS, 'qt', s.quota), logs: readForm(LOG_FIELDS, 'lg', s.logs), errorRules, retryRules };
+  const body = { revision: s.revision, upstream: s.upstream, routing: readForm(ROUTING_FIELDS, 'rt', s.routing), quota: readForm(QUOTA_FIELDS, 'qt', s.quota), logs: readForm(LOG_FIELDS, 'lg', s.logs), pricing: readPricing(), errorRules, retryRules };
   try { await api('PUT', '/api/settings', body); toast('已保存'); loadSettings(); } catch (e) { toast(e.message); }
 });
 $('#btn-default-rules').addEventListener('click', () => {
@@ -829,6 +861,18 @@ function statusBadge(st, result) {
   return `<span class="badge ${cls}">${esc(st)}</span>`;
 }
 const BIND = { hit: '命中', miss: '新绑定', provisional: '待确认', invalidated: '失效改派', 'temporary-overflow': '临时溢出', 'not-applicable': '—' };
+function cacheRateCell(r) {
+  let v = r.cacheRate;
+  if (v === undefined && r.inputTokens != null && r.cachedTokens != null) { // logged before cacheRate existed
+    const total = r.inputTokens + (r.inboundProtocol === 'anthropic' ? r.cachedTokens : 0);
+    v = total > 0 ? Math.min(r.cachedTokens / total, 1) : null;
+  }
+  if (v === null || v === undefined) return '—';
+  return `<span class="badge ${v >= 0.8 ? 'ok' : v >= 0.3 ? '' : 'warn'}">${(v * 100).toFixed(1)}%</span>`;
+}
+const CUR = { CNY: '¥', USD: '$' };
+function money(v, cur) { return (CUR[cur] || '') + (v >= 1 ? v.toFixed(2) : v.toFixed(4)); }
+function costCell(r) { return r.cost === undefined || r.cost === null ? '—' : esc(money(r.cost, r.currency)); }
 function requestRow(r) {
   const tok = [r.inputTokens, r.outputTokens, r.cachedTokens].map((v) => v === null || v === undefined ? '—' : num(v)).join(' / ');
   return `<tr data-rid="${esc(r.requestId)}"><td class="num">${esc(fmtTime(r.ts))}</td><td><span class="acc-sub">${esc(r.protocol || r.inboundProtocol || '—')}</span></td><td>${esc(r.model)}${r.stream ? ' <span class="badge">流</span>' : ''}</td>
@@ -836,7 +880,7 @@ function requestRow(r) {
     <td>${statusBadge(r.status, r.result)}${r.upstreamStatus && r.upstreamStatus !== r.status ? `<div class="acc-sub">上游 ${esc(r.upstreamStatus)}</div>` : ''}${r.errorCategory ? `<div class="acc-sub">${esc(r.errorCategory)}${r.blockedBy ? '/' + esc(r.blockedBy) : ''}</div>` : ''}</td>
     <td><span class="acc-sub">${esc(BIND[r.bindingResult] || r.bindingResult)}</span><div class="acc-sub">${esc(r.affinityKeyType)}</div></td>
     <td class="num">${r.ttftMs === null || r.ttftMs === undefined ? '—' : num(r.ttftMs) + 'ms'}</td><td class="num">${num(r.durationMs)}ms</td>
-    <td class="num">${tok}${r.cacheHit ? ' <span class="badge ok">缓存</span>' : ''}</td><td class="num">${r.attempts ? r.attempts.length : 0}</td></tr>`;
+    <td class="num">${tok}</td><td class="num">${cacheRateCell(r)}</td><td class="num">${costCell(r)}</td><td class="num">${r.attempts ? r.attempts.length : 0}</td></tr>`;
 }
 function detailRow(d) {
   const sz = (n, cut) => num(n) + ' B' + (cut ? ' <span class="badge warn">截断</span>' : '');

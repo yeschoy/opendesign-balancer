@@ -79,6 +79,9 @@ type requestLog struct {
 	OutputTokens       *int64             `json:"outputTokens"`
 	CachedTokens       *int64             `json:"cachedTokens"`
 	CacheHit           *bool              `json:"cacheHit"`
+	CacheRate          *float64           `json:"cacheRate"`      // cached share of the prompt, 0..1
+	Cost               *float64           `json:"cost,omitempty"` // in Currency, from the price table
+	Currency           string             `json:"currency,omitempty"`
 	Attempts           []attemptLog       `json:"attempts"`
 	Workflow           []workflowDecision `json:"workflow,omitempty"`
 }
@@ -107,6 +110,23 @@ type errorLog struct {
 	Switched            bool      `json:"switched"`
 	ResponseContentType string    `json:"responseContentType,omitempty"`
 	ResponseBytes       int       `json:"responseBytes"`
+}
+
+// cacheRate is the cached share of the prompt. Messages usage reports input
+// without the cache reads; Chat and Responses usage includes them.
+func cacheRate(in, cached *int64, anthropic bool) *float64 {
+	if in == nil || cached == nil {
+		return nil
+	}
+	total := *in
+	if anthropic {
+		total += *cached
+	}
+	if total <= 0 {
+		return nil
+	}
+	r := min(float64(*cached)/float64(total), 1)
+	return &r
 }
 
 // LogKeys are the logstore filter keys (logstore.Filters), as it would read
@@ -250,6 +270,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				rec.UpstreamStatus = &us
 			}
 		}
+		anthropic := proto == "anthropic"
+		rec.CacheRate = cacheRate(rec.InputTokens, rec.CachedTokens, anthropic)
+		var cost float64
+		if c, cur, ok := cfg.Pricing.Cost(rec.Model, rec.TS, rec.InputTokens, rec.CachedTokens, rec.OutputTokens, anthropic); ok {
+			cost, rec.Cost, rec.Currency = c, &c, cur
+		}
 		s.logs.Append("requests", rec.TS, rec)
 		if cw != nil {
 			max := cw.max
@@ -263,7 +289,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 			s.logs.Append("details", rec.TS, d)
 		}
-		s.stats.Record(rec.AccountID, result, rec.InputTokens, rec.OutputTokens, rec.CachedTokens)
+		s.stats.Record(rec.AccountID, result, rec.InputTokens, rec.OutputTokens, rec.CachedTokens, rec.Currency, cost)
 		s.statsDirty.Store(true)
 	}
 
@@ -288,8 +314,8 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reqBody = body
-	var obj map[string]any
-	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
+	obj, err := parseRequestBody(body)
+	if err != nil {
 		rec.ErrorCategory = "request"
 		writeLocalError(w, proto, http.StatusBadRequest, "invalid_request_error", "invalid_json", "request body must be a JSON object", 0)
 		finish(http.StatusBadRequest, "failed")

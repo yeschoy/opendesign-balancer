@@ -21,6 +21,7 @@ import (
 	"opendesign-balancer/internal/config"
 	"opendesign-balancer/internal/logstore"
 	"opendesign-balancer/internal/pool"
+	"opendesign-balancer/internal/pricing"
 	"opendesign-balancer/internal/quota"
 	"opendesign-balancer/internal/rules"
 	"opendesign-balancer/internal/stats"
@@ -873,6 +874,7 @@ type settingsDoc struct {
 	Routing    config.Routing    `json:"routing"`
 	Quota      config.Quota      `json:"quota"`
 	Logs       config.Logs       `json:"logs"`
+	Pricing    pricing.Config    `json:"pricing"`
 	ErrorRules []rules.ErrorRule `json:"errorRules"`
 	RetryRules []rules.RetryRule `json:"retryRules"`
 }
@@ -880,9 +882,9 @@ type settingsDoc struct {
 func (s *Server) apiSettings(w http.ResponseWriter, r *http.Request) {
 	c := s.cfg.Get()
 	writeJSON(w, http.StatusOK, map[string]any{
-		"settings":   settingsDoc{c.Revision, c.Upstream, c.Routing, c.Quota, c.Logs, c.ErrorRules, c.RetryRules},
+		"settings":   settingsDoc{c.Revision, c.Upstream, c.Routing, c.Quota, c.Logs, c.Pricing, c.ErrorRules, c.RetryRules},
 		"strategies": config.Strategies,
-		"defaults":   map[string]any{"errorRules": rules.DefaultErrorRules(), "retryRules": rules.DefaultRetryRules()},
+		"defaults":   map[string]any{"errorRules": rules.DefaultErrorRules(), "retryRules": rules.DefaultRetryRules(), "pricing": pricing.Defaults()},
 	})
 }
 
@@ -894,6 +896,7 @@ func (s *Server) apiSaveSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	cfg, err := s.cfg.Update(in.Revision, func(c *config.Config) error {
 		c.Upstream, c.Routing, c.Quota, c.Logs = in.Upstream, in.Routing, in.Quota, in.Logs
+		c.Pricing = in.Pricing
 		c.ErrorRules, c.RetryRules = in.ErrorRules, in.RetryRules
 		return nil
 	})

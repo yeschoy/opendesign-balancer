@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"opendesign-balancer/internal/fsutil"
+	"opendesign-balancer/internal/pricing"
 	"opendesign-balancer/internal/rules"
 )
 
@@ -151,6 +152,7 @@ type Config struct {
 	ErrorRules []rules.ErrorRule `json:"errorRules"`
 	RetryRules []rules.RetryRule `json:"retryRules"`
 	Logs       Logs              `json:"logs"`
+	Pricing    pricing.Config    `json:"pricing"`
 }
 
 func Default() *Config {
@@ -176,6 +178,7 @@ func Default() *Config {
 		Quota:      Quota{Enabled: true, IntervalSec: 60, Concurrency: 2, StaleSec: 900},
 		ErrorRules: rules.DefaultErrorRules(),
 		RetryRules: rules.DefaultRetryRules(),
+		Pricing:    pricing.Config{Models: pricing.Defaults(), Holidays: []string{}},
 		Logs:       Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100, MaxDetails: 500, DetailBodyKB: 64},
 	}
 }
@@ -503,6 +506,9 @@ func (c *Config) Normalize() error {
 		return err
 	}
 	if err := clampInt(&l.DetailBodyKB, 1, 256, "logs.detailBodyKB"); err != nil {
+		return err
+	}
+	if err := c.Pricing.Normalize(); err != nil {
 		return err
 	}
 	return nil
