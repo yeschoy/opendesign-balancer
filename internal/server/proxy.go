@@ -54,6 +54,7 @@ type requestLog struct {
 	Group              string             `json:"group,omitempty"`
 	Path               string             `json:"path"`
 	InboundProtocol    string             `json:"inboundProtocol"`
+	Protocol           string             `json:"protocol"`
 	Model              string             `json:"model"`
 	Stream             bool               `json:"stream"`
 	AccountID          string             `json:"accountId,omitempty"`
@@ -113,7 +114,7 @@ type errorLog struct {
 func (r *requestLog) LogKeys() map[string]string {
 	return map[string]string{"requestId": r.RequestID, "accountId": r.AccountID, "status": strconv.Itoa(r.Status),
 		"result": r.Result, "model": r.Model, "errorCategory": r.ErrorCategory, "bindingResult": r.BindingResult,
-		"clientKeyId": r.ClientKeyID, "stream": strconv.FormatBool(r.Stream)}
+		"clientKeyId": r.ClientKeyID, "stream": strconv.FormatBool(r.Stream), "protocol": r.Protocol}
 }
 
 func (e errorLog) LogKeys() map[string]string {
@@ -223,8 +224,15 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.URL.Path, "/v1/messages") {
 		proto = "anthropic"
 	}
+	var cw *captureWriter
+	var reqHeader http.Header
+	var reqBody []byte
+	if cfg.Logs.Detail {
+		cw = &captureWriter{ResponseWriter: w, max: cfg.Logs.DetailBodyKB << 10}
+		w, reqHeader = cw, r.Header.Clone()
+	}
 	w.Header().Set("X-Request-Id", rid)
-	rec := &requestLog{TS: start.UTC(), RequestID: rid, Path: r.URL.Path, InboundProtocol: proto, Selector: cfg.Routing.Strategy,
+	rec := &requestLog{TS: start.UTC(), RequestID: rid, Path: r.URL.Path, InboundProtocol: proto, Protocol: protocolOf(r.URL.Path), Selector: cfg.Routing.Strategy,
 		SessionSource: "none", AffinityKeyType: "none", AffinityConfidence: "none", BindingResult: "not-applicable", Attempts: []attemptLog{}}
 	var res *attemptResult
 	finish := func(status int, result string) {
@@ -243,6 +251,18 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		s.logs.Append("requests", rec.TS, rec)
+		if cw != nil {
+			max := cw.max
+			d := &detailLog{TS: rec.TS, RequestID: rid, Protocol: rec.Protocol, Method: r.Method, Path: r.URL.Path, Model: rec.Model,
+				AccountID: rec.AccountID, Status: status, RequestHeaders: maskHeaders(cfg, reqHeader), RequestBodyBytes: len(reqBody),
+				ResponseHeaders: maskHeaders(cfg, cw.Header()), ResponseBodyBytes: cw.n}
+			d.RequestBody, d.RequestBodyTruncated = maskBody(cfg, reqBody, max)
+			d.ResponseBody, d.ResponseBodyTruncated = maskBody(cfg, cw.buf, max)
+			if cw.n > len(cw.buf) {
+				d.ResponseBodyTruncated = true
+			}
+			s.logs.Append("details", rec.TS, d)
+		}
 		s.stats.Record(rec.AccountID, result, rec.InputTokens, rec.OutputTokens, rec.CachedTokens)
 		s.statsDirty.Store(true)
 	}
@@ -267,6 +287,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		finish(499, "client_cancelled")
 		return
 	}
+	reqBody = body
 	var obj map[string]any
 	if err := json.Unmarshal(body, &obj); err != nil || obj == nil {
 		rec.ErrorCategory = "request"

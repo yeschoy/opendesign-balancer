@@ -132,6 +132,10 @@ type Logs struct {
 	MaxRequests   int `json:"maxRequests"`
 	MaxErrors     int `json:"maxErrors"`
 	MaxTotalMB    int `json:"maxTotalMB"`
+	// Detail records every request's headers and bodies (client side); off by default.
+	Detail       bool `json:"detail"`
+	MaxDetails   int  `json:"maxDetails"`
+	DetailBodyKB int  `json:"detailBodyKB"` // each body is cut to this size
 }
 
 type Config struct {
@@ -172,7 +176,7 @@ func Default() *Config {
 		Quota:      Quota{Enabled: true, IntervalSec: 60, Concurrency: 2, StaleSec: 900},
 		ErrorRules: rules.DefaultErrorRules(),
 		RetryRules: rules.DefaultRetryRules(),
-		Logs:       Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100},
+		Logs:       Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100, MaxDetails: 500, DetailBodyKB: 64},
 	}
 }
 
@@ -481,6 +485,8 @@ func (c *Config) Normalize() error {
 	defInt(&l.MaxRequests, d.Logs.MaxRequests)
 	defInt(&l.MaxErrors, d.Logs.MaxErrors)
 	defInt(&l.MaxTotalMB, d.Logs.MaxTotalMB)
+	defInt(&l.MaxDetails, d.Logs.MaxDetails)
+	defInt(&l.DetailBodyKB, d.Logs.DetailBodyKB)
 	if err := clampInt(&l.RetentionDays, 1, 365, "logs.retentionDays"); err != nil {
 		return err
 	}
@@ -491,6 +497,12 @@ func (c *Config) Normalize() error {
 		return err
 	}
 	if err := clampInt(&l.MaxTotalMB, 10, 10240, "logs.maxTotalMB"); err != nil {
+		return err
+	}
+	if err := clampInt(&l.MaxDetails, 10, 5000, "logs.maxDetails"); err != nil {
+		return err
+	}
+	if err := clampInt(&l.DetailBodyKB, 1, 256, "logs.detailBodyKB"); err != nil {
 		return err
 	}
 	return nil

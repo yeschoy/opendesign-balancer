@@ -135,7 +135,7 @@ func New(dataDir string, opt Options) (*Server, error) {
 	s.logs, err = logstore.Open(filepath.Join(dataDir, "logs"), func() logstore.Limits {
 		l := s.cfg.Get().Logs
 		return logstore.Limits{RetentionDays: l.RetentionDays, MaxTotalBytes: int64(l.MaxTotalMB) << 20,
-			MaxRecords: map[string]int{"requests": l.MaxRequests, "errors": l.MaxErrors}}
+			MaxRecords: map[string]int{"requests": l.MaxRequests, "errors": l.MaxErrors, "details": l.MaxDetails}}
 	})
 	if err != nil {
 		return nil, err

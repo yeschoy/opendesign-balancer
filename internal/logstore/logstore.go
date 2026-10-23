@@ -23,6 +23,8 @@ import (
 const (
 	segmentBytes = 5 << 20
 	maxRecord    = 64 << 10
+	// detail records carry bodies, so they may be larger
+	maxDetailRecord = 2 << 20
 	// queries read the in-memory ring, so the files may trail it this long
 	flushEvery = time.Second
 )
@@ -97,8 +99,16 @@ type Store struct {
 
 // Filters are the query parameters each kind accepts besides limit/cursor/since/until.
 var Filters = map[string][]string{
-	"requests": {"requestId", "accountId", "status", "result", "model", "errorCategory", "bindingResult", "clientKeyId", "stream"},
+	"requests": {"requestId", "accountId", "status", "result", "model", "errorCategory", "bindingResult", "clientKeyId", "stream", "protocol"},
 	"errors":   {"requestId", "accountId", "status", "category", "ruleId", "model"},
+	"details":  {"requestId", "accountId", "status", "model", "protocol"},
+}
+
+func recordLimit(kindName string) int {
+	if kindName == "details" {
+		return maxDetailRecord
+	}
+	return maxRecord
 }
 
 func Open(dir string, limits func() Limits) (*Store, error) {
@@ -157,7 +167,7 @@ func (s *Store) Append(kindName string, ts time.Time, rec any) {
 		return
 	}
 	data, err := json.Marshal(rec)
-	if err != nil || len(data) > maxRecord {
+	if err != nil || len(data) > recordLimit(kindName) {
 		s.dropped.Add(1)
 		return
 	}
@@ -340,7 +350,7 @@ func (s *Store) recover() {
 				continue
 			}
 			sc := bufio.NewScanner(f)
-			sc.Buffer(make([]byte, 0, 64<<10), maxRecord+1024)
+			sc.Buffer(make([]byte, 0, 64<<10), recordLimit(name)+1024)
 			for sc.Scan() {
 				line := append([]byte(nil), sc.Bytes()...)
 				keys, ts, ok := extractKeys(line, k.filters)

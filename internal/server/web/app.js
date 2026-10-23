@@ -167,7 +167,7 @@ function showApp() {
 }
 
 // ---- navigation ----
-const pages = { overview: loadOverview, accounts: loadAccounts, keys: loadKeys, routing: loadSettings, requests: () => loadLogs('requests', true), errors: () => loadLogs('errors', true) };
+const pages = { overview: loadOverview, accounts: loadAccounts, keys: loadKeys, routing: loadSettings, requests: () => loadLogs('requests', true), errors: () => loadLogs('errors', true), details: () => loadLogs('details', true) };
 function go(page) {
   if (!pages[page]) page = 'overview';
   currentPage = page;
@@ -629,6 +629,7 @@ const QUOTA_FIELDS = [
 ];
 const LOG_FIELDS = [
   ['retentionDays', '保留天数', 'int'], ['maxRequests', '请求日志条数', 'int'], ['maxErrors', '错误日志条数', 'int'], ['maxTotalMB', '总容量（MB）', 'int'],
+  ['detail', '详细日志', 'bool', '记录请求头/体、响应头/体（凭据已脱敏），排查完请关闭'], ['maxDetails', '详细日志条数', 'int'], ['detailBodyKB', '单个体上限（KB）', 'int', '超出部分截断'],
 ];
 function renderForm(el, fields, obj, prefix) {
   el.innerHTML = fields.map(([k, label, type, extra, hint]) => {
@@ -817,7 +818,8 @@ $('#btn-preview').addEventListener('click', async () => {
 $('#btn-reset-counts').addEventListener('click', async () => { try { await api('POST', '/api/workflow/reset-counts'); toast('已清零'); } catch (e) { toast(e.message); } });
 
 // ---- logs ----
-const logState = { requests: { cursor: '', items: [] }, errors: { cursor: '', items: [] } };
+const logState = { requests: { cursor: '', items: [] }, errors: { cursor: '', items: [] }, details: { cursor: '', items: [] } };
+const LOG_PREFIX = { requests: 'rq', errors: 'er', details: 'dt' };
 function accountOptions(sel) {
   const cur = sel.value;
   sel.innerHTML = '<option value="">全部账号</option>' + accountsCache.map((a) => `<option value="${esc(a.id)}" ${a.id === cur ? 'selected' : ''}>${esc(a.name)}</option>`).join('');
@@ -829,12 +831,24 @@ function statusBadge(st, result) {
 const BIND = { hit: '命中', miss: '新绑定', provisional: '待确认', invalidated: '失效改派', 'temporary-overflow': '临时溢出', 'not-applicable': '—' };
 function requestRow(r) {
   const tok = [r.inputTokens, r.outputTokens, r.cachedTokens].map((v) => v === null || v === undefined ? '—' : num(v)).join(' / ');
-  return `<tr data-rid="${esc(r.requestId)}"><td class="num">${esc(fmtTime(r.ts))}</td><td>${esc(r.model)}${r.stream ? ' <span class="badge">流</span>' : ''}</td>
+  return `<tr data-rid="${esc(r.requestId)}"><td class="num">${esc(fmtTime(r.ts))}</td><td><span class="acc-sub">${esc(r.protocol || r.inboundProtocol || '—')}</span></td><td>${esc(r.model)}${r.stream ? ' <span class="badge">流</span>' : ''}</td>
     <td>${esc(r.accountName || '—')}${r.switched ? ' <span class="badge warn">换号</span>' : ''}${r.overflow ? ' <span class="badge warn">溢出</span>' : ''}</td>
     <td>${statusBadge(r.status, r.result)}${r.upstreamStatus && r.upstreamStatus !== r.status ? `<div class="acc-sub">上游 ${esc(r.upstreamStatus)}</div>` : ''}${r.errorCategory ? `<div class="acc-sub">${esc(r.errorCategory)}${r.blockedBy ? '/' + esc(r.blockedBy) : ''}</div>` : ''}</td>
     <td><span class="acc-sub">${esc(BIND[r.bindingResult] || r.bindingResult)}</span><div class="acc-sub">${esc(r.affinityKeyType)}</div></td>
     <td class="num">${r.ttftMs === null || r.ttftMs === undefined ? '—' : num(r.ttftMs) + 'ms'}</td><td class="num">${num(r.durationMs)}ms</td>
     <td class="num">${tok}${r.cacheHit ? ' <span class="badge ok">缓存</span>' : ''}</td><td class="num">${r.attempts ? r.attempts.length : 0}</td></tr>`;
+}
+function detailRow(d) {
+  const sz = (n, cut) => num(n) + ' B' + (cut ? ' <span class="badge warn">截断</span>' : '');
+  return `<tr><td class="num">${esc(fmtTime(d.ts))}</td><td><span class="acc-sub">${esc(d.protocol)}</span></td><td>${esc(d.model)}</td><td>${statusBadge(d.status)}</td>
+    <td class="num">${sz(d.requestBodyBytes, d.requestBodyTruncated)}</td><td class="num">${sz(d.responseBodyBytes, d.responseBodyTruncated)}</td><td class="small">${esc(d.requestId)}</td></tr>`;
+}
+function showDetail(d) {
+  const pretty = (t) => { try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return t; } };
+  const sec = (title, text) => `<h4>${esc(title)}</h4><pre>${esc(text)}</pre>`;
+  modal({ title: `${d.method} ${d.path} → ${d.status}`, wide: true, body:
+    sec('请求头', JSON.stringify(d.requestHeaders, null, 2)) + sec('请求体' + (d.requestBodyTruncated ? '（已截断）' : ''), pretty(d.requestBody)) +
+    sec('响应头', JSON.stringify(d.responseHeaders, null, 2)) + sec('响应体' + (d.responseBodyTruncated ? '（已截断）' : ''), pretty(d.responseBody)) });
 }
 function errorRow(e) {
   return `<tr><td class="num">${esc(fmtTime(e.ts))}</td><td>${esc(e.accountName)}</td><td>${esc(e.model)}</td>
@@ -845,8 +859,8 @@ function errorRow(e) {
 }
 async function loadLogs(kind, reset) {
   if (!accountsCache.length) { try { accountsCache = (await api('GET', '/api/accounts')).accounts; } catch { /* ignore */ } }
-  const p = kind === 'requests' ? 'rq' : 'er';
-  accountOptions($(`#${p}-account`));
+  const p = LOG_PREFIX[kind];
+  if (kind !== 'details') accountOptions($(`#${p}-account`));
   const st = logState[kind];
   if (reset) { st.cursor = ''; st.items = []; }
   const q = new URLSearchParams({ limit: '50' });
@@ -854,18 +868,18 @@ async function loadLogs(kind, reset) {
   const add = (k, v) => { if (v) q.set(k, v); };
   add('accountId', $(`#${p}-account`).value);
   add('status', $(`#${p}-status`).value.trim());
-  if (kind === 'requests') { add('result', $('#rq-result').value); add('model', $('#rq-model').value.trim()); } else add('ruleId', $('#er-rule').value.trim());
+  if (kind === 'requests') { add('result', $('#rq-result').value); add('protocol', $('#rq-protocol').value); add('model', $('#rq-model').value.trim()); } else if (kind === 'details') add('requestId', $('#dt-rid').value.trim()); else add('ruleId', $('#er-rule').value.trim());
   const d = await api('GET', `/api/logs/${kind}?${q}`);
   st.items = st.items.concat(d.items);
   st.cursor = d.nextCursor || '';
-  $(`#${p}-table tbody`).innerHTML = st.items.map(kind === 'requests' ? requestRow : errorRow).join('') || `<tr><td colspan="9" class="empty">暂无记录</td></tr>`;
+  $(`#${p}-table tbody`).innerHTML = st.items.map({ requests: requestRow, errors: errorRow, details: detailRow }[kind]).join('') || `<tr><td colspan="9" class="empty">暂无记录</td></tr>`;
   $(`#${p}-more`).classList.toggle('hidden', !st.cursor);
 }
-for (const [kind, p] of [['requests', 'rq'], ['errors', 'er']]) {
+for (const [kind, p] of Object.entries(LOG_PREFIX)) {
   $(`#btn-${p}-search`).addEventListener('click', () => loadLogs(kind, true).catch((e) => toast(e.message)));
   $(`#${p}-more`).addEventListener('click', () => loadLogs(kind, false).catch((e) => toast(e.message)));
   $(`#btn-${p}-clear`).addEventListener('click', async () => {
-    if (await modal({ title: '清空日志', body: `<p>确定清空全部${kind === 'requests' ? '请求' : '错误'}日志？</p>`, buttons: [{ label: '取消', value: 'c' }, { label: '清空', value: 'x', danger: true }] }) !== 'x') return;
+    if (await modal({ title: '清空日志', body: `<p>确定清空全部${{ requests: '请求', errors: '错误', details: '详细' }[kind]}日志？</p>`, buttons: [{ label: '取消', value: 'c' }, { label: '清空', value: 'x', danger: true }] }) !== 'x') return;
     try { await api('DELETE', `/api/logs/${kind}`); loadLogs(kind, true); } catch (e) { toast(e.message); }
   });
   $(`#${p}-table tbody`).addEventListener('click', (ev) => {
@@ -873,7 +887,8 @@ for (const [kind, p] of [['requests', 'rq'], ['errors', 'er']]) {
     if (!tr || !tr.parentElement) return;
     const idx = Array.from(tr.parentElement.children).indexOf(tr);
     const item = logState[kind].items[idx];
-    if (item) showJSON(kind === 'requests' ? '请求 ' + item.requestId : '错误 ' + item.requestId + ' #' + item.attemptIndex, item);
+    if (item && kind === 'details') showDetail(item);
+    else if (item) showJSON(kind === 'requests' ? '请求 ' + item.requestId : '错误 ' + item.requestId + ' #' + item.attemptIndex, item);
   });
 }
 

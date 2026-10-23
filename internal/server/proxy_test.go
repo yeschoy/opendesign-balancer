@@ -613,3 +613,31 @@ func TestInsufficientBalanceByFundingClass(t *testing.T) {
 		t.Fatalf("a Design Plan model refused for money must cool the account: %+v", v.State)
 	}
 }
+
+func TestDetailLogOffByDefaultAndMasksWhenOn(t *testing.T) {
+	e := newEnv(t, []config.Account{{ID: "a"}}, nil)
+	readAll(e.post("/v1/chat/completions", chat(false), nil))
+	if page, _ := e.srv.logs.Query("details", nil, time.Time{}, time.Time{}, 10, 0); len(page.Items) != 0 {
+		t.Fatalf("detail log written while off: %v", page.Items)
+	}
+	if logs := e.requestLogs(); logs[0]["protocol"] != "openai-chat" {
+		t.Fatalf("protocol = %v", logs[0]["protocol"])
+	}
+
+	if _, err := e.srv.cfg.Update(-1, func(c *config.Config) error { c.Logs.Detail = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	readAll(e.post("/v1/chat/completions", chat(true), map[string]string{"X-Custom": "v1"}))
+	page, _ := e.srv.logs.Query("details", nil, time.Time{}, time.Time{}, 10, 0)
+	if len(page.Items) != 1 {
+		t.Fatalf("details = %d", len(page.Items))
+	}
+	var d detailLog
+	_ = json.Unmarshal(page.Items[0], &d)
+	if d.Protocol != "openai-chat" || d.Status != 200 || !strings.Contains(d.RequestBody, secretMarker) || d.RequestHeaders["X-Custom"][0] != "v1" || d.ResponseBodyBytes == 0 || d.ResponseBody == "" {
+		t.Fatalf("detail = %+v", d)
+	}
+	if d.RequestHeaders["Authorization"][0] != "[REDACTED]" || strings.Contains(string(page.Items[0]), e.key) {
+		t.Fatalf("credential not masked: %v", d.RequestHeaders)
+	}
+}

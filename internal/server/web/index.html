@@ -29,6 +29,7 @@
       <a data-page="routing">路由设置</a>
       <a data-page="requests">请求日志</a>
       <a data-page="errors">错误日志</a>
+      <a data-page="details">详细日志</a>
     </nav>
     <div class="side-foot">
       <button class="btn ghost small" id="btn-password">修改密码</button>
@@ -140,6 +141,7 @@
         <div class="actions">
           <select id="rq-account"><option value="">全部账号</option></select>
           <select id="rq-result"><option value="">全部结果</option><option value="success">成功</option><option value="failed">失败</option><option value="client_cancelled">取消</option></select>
+          <select id="rq-protocol"><option value="">全部协议</option><option value="openai-chat">openai-chat</option><option value="openai-responses">openai-responses</option><option value="anthropic-messages">anthropic-messages</option><option value="openai-completions">openai-completions</option><option value="openai-embeddings">openai-embeddings</option></select>
           <input id="rq-model" placeholder="模型" size="14">
           <input id="rq-status" placeholder="状态码" size="6">
           <button class="btn" id="btn-rq-search">查询</button>
@@ -147,7 +149,7 @@
         </div>
       </header>
       <div class="panel flush"><div class="table-wrap"><table class="table click" id="rq-table">
-        <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>状态</th><th>会话</th><th>首字</th><th>耗时</th><th>输入/输出/缓存</th><th>尝试</th></tr></thead><tbody></tbody></table></div>
+        <thead><tr><th>时间</th><th>协议</th><th>模型</th><th>账号</th><th>状态</th><th>会话</th><th>首字</th><th>耗时</th><th>输入/输出/缓存</th><th>尝试</th></tr></thead><tbody></tbody></table></div>
         <div class="more"><button class="btn ghost hidden" id="rq-more">加载更多</button></div>
       </div>
     </section>
@@ -165,6 +167,22 @@
       <div class="panel flush"><div class="table-wrap"><table class="table click" id="er-table">
         <thead><tr><th>时间</th><th>账号</th><th>模型</th><th>状态</th><th>分类</th><th>规则/动作</th><th>原因</th></tr></thead><tbody></tbody></table></div>
         <div class="more"><button class="btn ghost hidden" id="er-more">加载更多</button></div>
+      </div>
+    </section>
+
+    <section id="page-details" class="page hidden">
+      <header class="page-head"><h1>详细日志 <span class="muted small">默认关闭，在“路由设置 → 日志”里开启；记录客户端侧请求头/体与响应头/体，凭据已脱敏</span></h1>
+        <div class="actions">
+          <input id="dt-account" type="hidden">
+          <input id="dt-rid" placeholder="请求 ID" size="18">
+          <input id="dt-status" placeholder="状态码" size="6">
+          <button class="btn" id="btn-dt-search">查询</button>
+          <button class="btn ghost" id="btn-dt-clear">清空</button>
+        </div>
+      </header>
+      <div class="panel flush"><div class="table-wrap"><table class="table click" id="dt-table">
+        <thead><tr><th>时间</th><th>协议</th><th>模型</th><th>状态</th><th>请求体</th><th>响应体</th><th>请求 ID</th></tr></thead><tbody></tbody></table></div>
+        <div class="more"><button class="btn ghost hidden" id="dt-more">加载更多</button></div>
       </div>
     </section>
   </main>
