@@ -3,6 +3,8 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"embed"
 	"encoding/json"
 	"errors"
@@ -32,13 +34,25 @@ const csp = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 's
 func (s *Server) registerAdmin(mux *http.ServeMux) {
 	sub, _ := fs.Sub(webFS, "web")
 	static := http.FileServer(http.FS(sub))
+	// The assets carry a content hash in their URL so a proxy or browser that
+	// cached an older app.js/app.css (the page is served behind a CDN) can't
+	// pair it with a newer index.html.
+	index, _ := fs.ReadFile(sub, "index.html")
+	sum := sha256.New()
+	for _, f := range []string{"app.css", "app.js"} {
+		b, _ := fs.ReadFile(sub, f)
+		sum.Write(b)
+	}
+	ver := "?v=" + hex.EncodeToString(sum.Sum(nil))[:10]
+	index = bytes.ReplaceAll(index, []byte(`/assets/app.css"`), []byte(`/assets/app.css`+ver+`"`))
+	index = bytes.ReplaceAll(index, []byte(`/assets/app.js"`), []byte(`/assets/app.js`+ver+`"`))
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Security-Policy", csp)
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		data, _ := fs.ReadFile(sub, "index.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write(data)
+		_, _ = w.Write(index)
 	})
 	mux.HandleFunc("GET /assets/", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Security-Policy", csp)
