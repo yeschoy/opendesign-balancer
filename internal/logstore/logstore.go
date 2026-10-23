@@ -24,7 +24,9 @@ const (
 	segmentBytes = 5 << 20
 	maxRecord    = 64 << 10
 	// detail records carry bodies, so they may be larger
-	maxDetailRecord = 6 << 20
+	maxDetailRecord = 32 << 20
+	// the details ring holds whole bodies in memory: bound it by size, not just count
+	detailRingBytes = 256 << 20
 	// queries read the in-memory ring, so the files may trail it this long
 	flushEvery = time.Second
 )
@@ -66,10 +68,32 @@ func (k *kind) push(r record, max int) {
 	}
 	if len(k.ring) < max {
 		k.ring = append(k.ring, r)
+	} else {
+		k.ring[k.head] = r
+		k.head = (k.head + 1) % max
+	}
+	if k.name == "details" {
+		k.trimBytes(detailRingBytes)
+	}
+}
+
+// trimBytes drops the oldest records while the ring holds more than budget
+// bytes, always keeping the newest (caller holds the lock).
+func (k *kind) trimBytes(budget int) {
+	total := 0
+	for i := range k.ring {
+		total += len(k.ring[i].data)
+	}
+	if total <= budget {
 		return
 	}
-	k.ring[k.head] = r
-	k.head = (k.head + 1) % max
+	all := k.ordered()
+	drop := 0
+	for total > budget && drop < len(all)-1 {
+		total -= len(all[drop].data)
+		drop++
+	}
+	k.ring, k.head = append([]record(nil), all[drop:]...), 0
 }
 
 // ordered is the ring oldest first (caller holds the lock).
@@ -309,11 +333,29 @@ func (s *Store) enforce() {
 		keep = append(keep, f)
 	}
 	sort.Slice(keep, func(i, j int) bool { return keep[i].mod.Before(keep[j].mod) })
+	// detail segments are large: keep them to half the cap so they can't push the request log out
+	var detailTotal int64
+	for _, f := range keep {
+		if f.kind == "details" {
+			detailTotal += f.size
+		}
+	}
+	for i, f := range keep {
+		if detailTotal <= lim.MaxTotalBytes/2 {
+			break
+		}
+		if f.kind == "details" && !s.isCurrent(f.path) {
+			os.Remove(f.path)
+			detailTotal -= f.size
+			total -= f.size
+			keep[i].path = ""
+		}
+	}
 	for _, f := range keep {
 		if total <= lim.MaxTotalBytes {
 			break
 		}
-		if s.isCurrent(f.path) {
+		if f.path == "" || s.isCurrent(f.path) {
 			continue
 		}
 		os.Remove(f.path)

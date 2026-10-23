@@ -179,7 +179,7 @@ func Default() *Config {
 		ErrorRules: rules.DefaultErrorRules(),
 		RetryRules: rules.DefaultRetryRules(),
 		Pricing:    pricing.Config{Models: pricing.Defaults(), Holidays: []string{}},
-		Logs:       Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100, MaxDetails: 500, DetailBodyKB: 256},
+		Logs:       Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100, MaxDetails: 500, DetailBodyKB: 6144},
 	}
 }
 
@@ -505,7 +505,7 @@ func (c *Config) Normalize() error {
 	if err := clampInt(&l.MaxDetails, 10, 5000, "logs.maxDetails"); err != nil {
 		return err
 	}
-	if err := clampInt(&l.DetailBodyKB, 1, 1024, "logs.detailBodyKB"); err != nil {
+	if err := clampInt(&l.DetailBodyKB, 1, 6144, "logs.detailBodyKB"); err != nil {
 		return err
 	}
 	if err := c.Pricing.Normalize(); err != nil {

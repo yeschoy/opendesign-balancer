@@ -65,3 +65,14 @@ func TestBufferedWritesFlushOnCloseAndRecover(t *testing.T) {
 		t.Fatalf("not recovered from disk: %v", page.Items)
 	}
 }
+
+func TestDetailRingIsBoundedByBytes(t *testing.T) {
+	k := &kind{name: "details"}
+	big := make([]byte, 100<<20)
+	for i := 0; i < 5; i++ {
+		k.push(record{data: big}, 500)
+	}
+	if got := len(k.ordered()); got != 2 {
+		t.Fatalf("ring kept %d records of 100 MiB, want 2 within the 256 MiB budget", got)
+	}
+}

@@ -193,11 +193,18 @@ async function loadOverview() {
     ...o.windows.map((w) => [`${fmtDur(w.durationSeconds)}窗口剩余`, num(w.remaining), `共 ${num(w.limit)} · ${w.workspaces} 个工作区 · 已用 ${w.limit ? (w.used / w.limit * 100).toFixed(1) : 0}%`]),
     ['钱包合计', '$' + o.walletUsd.toFixed(2), `${o.walletAccounts} 个工作区`],
     ['24h 请求', num(st.r), `成功率 ${okRate === null ? '—' : pct(okRate)} · 近 1h ${num(o.stats.lastHour.r)}`],
-    ['24h 费用', [st.cc ? money(st.cc, 'CNY') : '', st.cu ? money(st.cu, 'USD') : ''].filter(Boolean).join(' + ') || '—', '按“路由设置”里的模型价格估算；无价格或无用量的请求不计'],
+    ['24h 费用', costSum(st), '按模型价格估算，未配价格的不计'],
+    ['24h 缓存命中率', hitRate(st) === null ? '—' : pct(hitRate(st)), `缓存 ${num(st.k)} / 提示 ${num(st.p || st.i)} token`],
     ['24h Token', num(st.i + st.o), `输入 ${num(st.i)} · 输出 ${num(st.o)} · 缓存 ${num(st.k)}`],
     ['会话绑定', num(o.bindings), `策略 ${o.strategy}`],
   ];
   $('#ov-cards').innerHTML = cards.map(([l, v, s]) => `<div class="card"><div class="label">${esc(l)}</div><div class="value">${esc(v)}</div><div class="sub">${esc(s)}</div></div>`).join('');
+  const models = Object.entries(o.stats.models || {}).sort((a, b) => b[1].r - a[1].r);
+  $('#ov-models tbody').innerHTML = models.map(([name, b]) => {
+    const done = b.r - b.c;
+    const hr = hitRate(b);
+    return `<tr><td>${esc(name)}</td><td class="num">${num(b.r)}</td><td class="num">${done > 0 ? pct(b.s / done) : '—'}</td><td class="num">${num(b.i)}</td><td class="num">${num(b.o)}</td><td class="num">${hr === null ? '—' : pct(hr)}</td><td class="num">${esc(costSum(b))}</td></tr>`;
+  }).join('') || '<tr><td colspan="7" class="empty">暂无请求</td></tr>';
   const hourly = o.stats.hourly;
   const peak = Math.max(1, ...hourly.map((b) => b.r));
   $('#ov-chart').innerHTML = hourly.map((b) => {
@@ -630,7 +637,7 @@ const QUOTA_FIELDS = [
 ];
 const LOG_FIELDS = [
   ['retentionDays', '保留天数', 'int'], ['maxRequests', '请求日志条数', 'int'], ['maxErrors', '错误日志条数', 'int'], ['maxTotalMB', '总容量（MB）', 'int'],
-  ['detail', '详细日志', 'bool', '记录请求头/体、响应头/体（凭据已脱敏），排查完请关闭'], ['maxDetails', '详细日志条数', 'int'], ['detailBodyKB', '单个体上限（KB）', 'int', '超出时保留头尾各一半、省略中间；内存约占 条数 × 上限 × 2，调大请同时调小条数'],
+  ['detail', '详细日志', 'bool', '记录请求头/体、响应头/体（凭据已脱敏），排查完请关闭'], ['maxDetails', '详细日志条数', 'int'], ['detailBodyKB', '单个体上限（KB）', 'int', '超出时保留头尾各一半、省略中间；内存中的详细日志总量上限 256MB，超出自动淘汰最旧的'],
 ];
 function renderForm(el, fields, obj, prefix) {
   el.innerHTML = fields.map(([k, label, type, extra, hint]) => {
@@ -871,7 +878,10 @@ function cacheRateCell(r) {
   return `<span class="badge ${v >= 0.8 ? 'ok' : v >= 0.3 ? '' : 'warn'}">${(v * 100).toFixed(1)}%</span>`;
 }
 const CUR = { CNY: '¥', USD: '$' };
-function money(v, cur) { return (CUR[cur] || '') + (v >= 1 ? v.toFixed(2) : v.toFixed(4)); }
+function money(v, cur) { return (CUR[cur] || '') + (v >= 1 ? v.toFixed(2) : v >= 0.01 ? v.toFixed(4) : v.toFixed(6)); }
+function costSum(b) { return [b.cc ? money(b.cc, 'CNY') : '', b.cu ? money(b.cu, 'USD') : ''].filter(Boolean).join(' + ') || '—'; }
+// cached share of the prompt; Prompt is absent in buckets recorded before it existed (then input is the prompt)
+function hitRate(b) { const p = b.p || b.i; return p ? b.k / p : null; }
 function costCell(r) { return r.cost === undefined || r.cost === null ? '—' : esc(money(r.cost, r.currency)); }
 function requestRow(r) {
   const tok = [r.inputTokens, r.outputTokens, r.cachedTokens].map((v) => v === null || v === undefined ? '—' : num(v)).join(' / ');

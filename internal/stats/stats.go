@@ -16,6 +16,7 @@ type Bucket struct {
 	Input     int64   `json:"i"`
 	Output    int64   `json:"o"`
 	Cached    int64   `json:"k"`
+	Prompt    int64   `json:"p,omitempty"` // total prompt tokens (cache hits included), for the hit rate
 	CostCNY   float64 `json:"cc,omitempty"`
 	CostUSD   float64 `json:"cu,omitempty"`
 }
@@ -28,6 +29,7 @@ func (b *Bucket) add(o Bucket) {
 	b.Input += o.Input
 	b.Output += o.Output
 	b.Cached += o.Cached
+	b.Prompt += o.Prompt
 	b.CostCNY += o.CostCNY
 	b.CostUSD += o.CostUSD
 }
@@ -46,18 +48,35 @@ type Stats struct {
 	mu      sync.Mutex
 	global  ring
 	account map[string]*ring
+	model   map[string]*ring
 	now     func() time.Time
 }
 
-func New() *Stats { return &Stats{account: map[string]*ring{}, now: time.Now} }
+func New() *Stats {
+	return &Stats{account: map[string]*ring{}, model: map[string]*ring{}, now: time.Now}
+}
 
-// Record adds one finished request. result is success | failed | client_cancelled.
-func (s *Stats) Record(accountID, result string, input, output, cached *int64, currency string, cost float64) {
+// maxModels bounds the per-model rings: model names come from clients.
+const maxModels = 100
+
+// Sample is one finished request.
+type Sample struct {
+	AccountID, Model string
+	Result           string // success | failed | client_cancelled
+	Input, Output    *int64
+	Cached           *int64
+	Prompt           int64 // total prompt tokens, cache hits included
+	Currency         string
+	Cost             float64
+}
+
+// Record adds one finished request.
+func (s *Stats) Record(x Sample) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	m := s.now().Unix() / 60
-	d := Bucket{Requests: 1}
-	switch result {
+	d := Bucket{Requests: 1, Prompt: x.Prompt}
+	switch x.Result {
 	case "success":
 		d.Success = 1
 	case "client_cancelled":
@@ -65,28 +84,38 @@ func (s *Stats) Record(accountID, result string, input, output, cached *int64, c
 	default:
 		d.Failed = 1
 	}
-	switch currency {
+	switch x.Currency {
 	case "CNY":
-		d.CostCNY = cost
+		d.CostCNY = x.Cost
 	case "USD":
-		d.CostUSD = cost
+		d.CostUSD = x.Cost
 	}
-	for _, x := range []struct {
+	for _, y := range []struct {
 		p   *int64
 		dst *int64
-	}{{input, &d.Input}, {output, &d.Output}, {cached, &d.Cached}} {
-		if x.p != nil {
-			*x.dst = *x.p
+	}{{x.Input, &d.Input}, {x.Output, &d.Output}, {x.Cached, &d.Cached}} {
+		if y.p != nil {
+			*y.dst = *y.p
 		}
 	}
 	s.global.slot(m).add(d)
-	if accountID != "" {
-		r := s.account[accountID]
+	if x.AccountID != "" {
+		r := s.account[x.AccountID]
 		if r == nil {
 			r = &ring{}
-			s.account[accountID] = r
+			s.account[x.AccountID] = r
 		}
 		r.slot(m).add(d)
+	}
+	if x.Model != "" {
+		r := s.model[x.Model]
+		if r == nil && len(s.model) < maxModels {
+			r = &ring{}
+			s.model[x.Model] = r
+		}
+		if r != nil {
+			r.slot(m).add(d)
+		}
 	}
 }
 
@@ -94,6 +123,7 @@ type Summary struct {
 	Total     Bucket            `json:"total"`
 	Hourly    []Bucket          `json:"hourly"` // 24 entries, oldest first; Minute is the hour's first minute
 	Accounts  map[string]Bucket `json:"accounts"`
+	Models    map[string]Bucket `json:"models"`
 	LastHour  Bucket            `json:"lastHour"`
 	Generated time.Time         `json:"generated"`
 }
@@ -105,7 +135,7 @@ func (s *Stats) Summary() Summary {
 	m := now.Unix() / 60
 	cut := m - 1440
 	hourStart := (m/60 - 23) * 60
-	out := Summary{Hourly: make([]Bucket, 24), Accounts: map[string]Bucket{}, Generated: now.UTC()}
+	out := Summary{Hourly: make([]Bucket, 24), Accounts: map[string]Bucket{}, Models: map[string]Bucket{}, Generated: now.UTC()}
 	for i := range out.Hourly {
 		out.Hourly[i].Minute = hourStart + int64(i)*60
 	}
@@ -132,12 +162,24 @@ func (s *Stats) Summary() Summary {
 			out.Accounts[id] = t
 		}
 	}
+	for name, r := range s.model {
+		var t Bucket
+		for _, b := range r {
+			if b.Minute > cut {
+				t.add(b)
+			}
+		}
+		if t.Requests > 0 {
+			out.Models[name] = t
+		}
+	}
 	return out
 }
 
 type Export struct {
 	Global   []Bucket            `json:"global"`
 	Accounts map[string][]Bucket `json:"accounts"`
+	Models   map[string][]Bucket `json:"models,omitempty"`
 }
 
 func (s *Stats) Export() Export {
@@ -153,10 +195,15 @@ func (s *Stats) Export() Export {
 		}
 		return out
 	}
-	e := Export{Global: pick(&s.global), Accounts: map[string][]Bucket{}}
+	e := Export{Global: pick(&s.global), Accounts: map[string][]Bucket{}, Models: map[string][]Bucket{}}
 	for id, r := range s.account {
 		if l := pick(r); len(l) > 0 {
 			e.Accounts[id] = l
+		}
+	}
+	for name, r := range s.model {
+		if l := pick(r); len(l) > 0 {
+			e.Models[name] = l
 		}
 	}
 	return e
@@ -174,6 +221,16 @@ func (s *Stats) Import(e Export) {
 			r[b.Minute%1440] = b
 		}
 		s.account[id] = r
+	}
+	for name, l := range e.Models {
+		if len(s.model) >= maxModels {
+			break
+		}
+		r := &ring{}
+		for _, b := range l {
+			r[b.Minute%1440] = b
+		}
+		s.model[name] = r
 	}
 }
 

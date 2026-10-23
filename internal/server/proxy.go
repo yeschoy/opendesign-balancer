@@ -23,6 +23,7 @@ import (
 	"opendesign-balancer/internal/config"
 	"opendesign-balancer/internal/pool"
 	"opendesign-balancer/internal/rules"
+	"opendesign-balancer/internal/stats"
 )
 
 // ---- log records: strict projections, never a request, account or error object ----
@@ -288,7 +289,15 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			d.ResponseBodyTruncated = cut
 			s.logs.Append("details", rec.TS, d)
 		}
-		s.stats.Record(rec.AccountID, result, rec.InputTokens, rec.OutputTokens, rec.CachedTokens, rec.Currency, cost)
+		var prompt int64
+		if rec.InputTokens != nil {
+			prompt = *rec.InputTokens
+			if anthropic && rec.CachedTokens != nil {
+				prompt += *rec.CachedTokens
+			}
+		}
+		s.stats.Record(stats.Sample{AccountID: rec.AccountID, Model: rec.Model, Result: result, Input: rec.InputTokens, Output: rec.OutputTokens,
+			Cached: rec.CachedTokens, Prompt: prompt, Currency: rec.Currency, Cost: cost})
 		s.statsDirty.Store(true)
 	}
 
