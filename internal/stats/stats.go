@@ -49,19 +49,24 @@ type Stats struct {
 	global  ring
 	account map[string]*ring
 	model   map[string]*ring
+	proxy   map[string]*ring
 	now     func() time.Time
 }
 
 func New() *Stats {
-	return &Stats{account: map[string]*ring{}, model: map[string]*ring{}, now: time.Now}
+	return &Stats{account: map[string]*ring{}, model: map[string]*ring{}, proxy: map[string]*ring{}, now: time.Now}
 }
 
 // maxModels bounds the per-model rings: model names come from clients.
 const maxModels = 100
 
+// maxProxies bounds the per-egress rings: one per distinct account proxy.
+const maxProxies = 200
+
 // Sample is one finished request.
 type Sample struct {
 	AccountID, Model string
+	Proxy            string // egress label: proxy host:port, or "direct"
 	Result           string // success | failed | client_cancelled
 	Input, Output    *int64
 	Cached           *int64
@@ -107,6 +112,16 @@ func (s *Stats) Record(x Sample) {
 		}
 		r.slot(m).add(d)
 	}
+	if x.Proxy != "" {
+		r := s.proxy[x.Proxy]
+		if r == nil && len(s.proxy) < maxProxies {
+			r = &ring{}
+			s.proxy[x.Proxy] = r
+		}
+		if r != nil {
+			r.slot(m).add(d)
+		}
+	}
 	if x.Model != "" {
 		r := s.model[x.Model]
 		if r == nil && len(s.model) < maxModels {
@@ -124,6 +139,7 @@ type Summary struct {
 	Hourly    []Bucket          `json:"hourly"` // 24 entries, oldest first; Minute is the hour's first minute
 	Accounts  map[string]Bucket `json:"accounts"`
 	Models    map[string]Bucket `json:"models"`
+	Proxies   map[string]Bucket `json:"proxies"`
 	LastHour  Bucket            `json:"lastHour"`
 	Generated time.Time         `json:"generated"`
 }
@@ -135,7 +151,7 @@ func (s *Stats) Summary() Summary {
 	m := now.Unix() / 60
 	cut := m - 1440
 	hourStart := (m/60 - 23) * 60
-	out := Summary{Hourly: make([]Bucket, 24), Accounts: map[string]Bucket{}, Models: map[string]Bucket{}, Generated: now.UTC()}
+	out := Summary{Hourly: make([]Bucket, 24), Accounts: map[string]Bucket{}, Models: map[string]Bucket{}, Proxies: map[string]Bucket{}, Generated: now.UTC()}
 	for i := range out.Hourly {
 		out.Hourly[i].Minute = hourStart + int64(i)*60
 	}
@@ -173,6 +189,17 @@ func (s *Stats) Summary() Summary {
 			out.Models[name] = t
 		}
 	}
+	for name, r := range s.proxy {
+		var t Bucket
+		for _, b := range r {
+			if b.Minute > cut {
+				t.add(b)
+			}
+		}
+		if t.Requests > 0 {
+			out.Proxies[name] = t
+		}
+	}
 	return out
 }
 
@@ -180,6 +207,7 @@ type Export struct {
 	Global   []Bucket            `json:"global"`
 	Accounts map[string][]Bucket `json:"accounts"`
 	Models   map[string][]Bucket `json:"models,omitempty"`
+	Proxies  map[string][]Bucket `json:"proxies,omitempty"`
 }
 
 func (s *Stats) Export() Export {
@@ -195,7 +223,7 @@ func (s *Stats) Export() Export {
 		}
 		return out
 	}
-	e := Export{Global: pick(&s.global), Accounts: map[string][]Bucket{}, Models: map[string][]Bucket{}}
+	e := Export{Global: pick(&s.global), Accounts: map[string][]Bucket{}, Models: map[string][]Bucket{}, Proxies: map[string][]Bucket{}}
 	for id, r := range s.account {
 		if l := pick(r); len(l) > 0 {
 			e.Accounts[id] = l
@@ -204,6 +232,11 @@ func (s *Stats) Export() Export {
 	for name, r := range s.model {
 		if l := pick(r); len(l) > 0 {
 			e.Models[name] = l
+		}
+	}
+	for name, r := range s.proxy {
+		if l := pick(r); len(l) > 0 {
+			e.Proxies[name] = l
 		}
 	}
 	return e
@@ -239,6 +272,16 @@ func (s *Stats) Import(e Export) {
 			break
 		}
 		s.model[name] = load(l)
+	}
+	s.importProxies(e, load)
+}
+
+func (s *Stats) importProxies(e Export, load func([]Bucket) *ring) {
+	for name, l := range e.Proxies {
+		if len(s.proxy) >= maxProxies {
+			break
+		}
+		s.proxy[name] = load(l)
 	}
 }
 

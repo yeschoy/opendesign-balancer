@@ -205,6 +205,11 @@ async function loadOverview() {
     const hr = hitRate(b);
     return `<tr><td>${esc(name)}</td><td class="num">${num(b.r)}</td><td class="num">${done > 0 ? pct(b.s / done) : '—'}</td><td class="num">${num(b.i)}</td><td class="num">${num(b.o)}</td><td class="num">${hr === null ? '—' : pct(hr)}</td><td class="num">${esc(costSum(b))}</td></tr>`;
   }).join('') || '<tr><td colspan="7" class="empty">暂无请求</td></tr>';
+  const proxies = Object.entries(o.stats.proxies || {}).sort((a, b) => b[1].r - a[1].r);
+  $('#ov-proxies tbody').innerHTML = proxies.map(([name, b]) => {
+    const done = b.r - b.c;
+    return `<tr><td>${name === 'direct' ? '直连' : esc(name)}</td><td class="num">${num(b.r)}</td><td class="num">${done > 0 ? pct(b.s / done) : '—'}</td><td class="num">${num(b.s)}</td><td class="num">${num(b.f)}</td><td class="num">${num(b.c)}</td></tr>`;
+  }).join('') || '<tr><td colspan="6" class="empty">暂无请求</td></tr>';
   const hourly = o.stats.hourly;
   const peak = Math.max(1, ...hourly.map((b) => b.r));
   $('#ov-chart').innerHTML = hourly.map((b) => {

@@ -13,6 +13,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptrace"
+	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
@@ -60,6 +61,7 @@ type requestLog struct {
 	Stream             bool               `json:"stream"`
 	AccountID          string             `json:"accountId,omitempty"`
 	AccountName        string             `json:"accountName,omitempty"`
+	Proxy              string             `json:"proxy,omitempty"` // egress label: proxy host:port or "direct"
 	SelectionReason    string             `json:"selectionReason,omitempty"`
 	Selector           string             `json:"selector"`
 	Overflow           bool               `json:"overflow"`
@@ -297,7 +299,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				prompt += *rec.CachedTokens
 			}
 		}
-		s.stats.Record(stats.Sample{AccountID: rec.AccountID, Model: rec.Model, Result: result, Input: rec.InputTokens, Output: rec.OutputTokens,
+		s.stats.Record(stats.Sample{AccountID: rec.AccountID, Proxy: rec.Proxy, Model: rec.Model, Result: result, Input: rec.InputTokens, Output: rec.OutputTokens,
 			Cached: rec.CachedTokens, Prompt: prompt, Currency: rec.Currency, Cost: cost})
 		s.statsDirty.Store(true)
 	}
@@ -397,6 +399,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			rec.Workflow = append(rec.Workflow, workflowDecision{Account: acct.ID, Reason: d.Reason, Binding: d.BindingResult, Overflow: d.Overflow, Order: order})
 		}
 		rec.AccountID, rec.AccountName, rec.SelectionReason, rec.Overflow = acct.ID, acct.Name, d.Reason, d.Overflow
+		rec.Proxy = egressLabel(acct.ProxyURL)
 
 		res = s.attempt(w, r, cfg, lease, body, proto, rec, i+1, start, ck.Group)
 		lease.Release()
@@ -1343,4 +1346,15 @@ func membershipLimits(lower string) (conc, rpm int) {
 		rpm, _ = strconv.Atoi(m[2])
 	}
 	return conc, rpm
+}
+
+// egressLabel names an account's outbound path without its credentials.
+func egressLabel(proxyURL string) string {
+	if proxyURL == "" {
+		return "direct"
+	}
+	if u, err := url.Parse(proxyURL); err == nil && u.Host != "" {
+		return u.Host
+	}
+	return "proxy"
 }
