@@ -968,6 +968,15 @@ func hasUsage(data []byte) bool {
 	}
 }
 
+// isTerminalEvent says whether an SSE event ends a stream: OpenAI's
+// [DONE], Anthropic's message_stop, the Responses API's response.completed.
+func isTerminalEvent(event string, data []byte) bool {
+	if bytes.Equal(bytes.TrimSpace(data), []byte("[DONE]")) {
+		return true
+	}
+	return event == "message_stop" || event == "response.completed"
+}
+
 type evMsg struct {
 	ev  []byte
 	err error
@@ -1084,13 +1093,22 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, cfg *config
 		select {
 		case m := <-events:
 			if len(m.ev) > 0 {
+				event, data, _ := sseFields(m.ev)
+				done := isTerminalEvent(event, data)
 				if !write(m.ev) {
+					if done {
+						return res // the client had what it needs and hung up first
+					}
 					return clientGone()
 				}
-				event, data, _ := sseFields(m.ev)
 				scan(event, data)
 				if isErr, _, _ := sseError(event, data); isErr {
 					res.result, res.category = "failed", "upstream"
+				}
+				if done {
+					// Clients close as soon as they see the last event; don't wait
+					// for the upstream EOF, or that close reads as a cancellation.
+					return res
 				}
 				idle.Reset(idleDur)
 			}

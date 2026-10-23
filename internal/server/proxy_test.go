@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -639,5 +640,34 @@ func TestDetailLogOffByDefaultAndMasksWhenOn(t *testing.T) {
 	}
 	if d.RequestHeaders["Authorization"][0] != "[REDACTED]" || strings.Contains(string(page.Items[0]), e.key) {
 		t.Fatalf("credential not masked: %v", d.RequestHeaders)
+	}
+}
+
+func TestClientClosingAfterDoneIsNotCancelled(t *testing.T) {
+	e := newEnv(t, []config.Account{{ID: "a"}}, nil)
+	e.up.handle = func(w http.ResponseWriter, r *http.Request, key string, body map[string]any) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n")
+		fmt.Fprint(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":1}}\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n")
+		w.(http.Flusher).Flush()
+		<-r.Context().Done() // upstream lingers: no EOF until the proxy lets go
+	}
+	resp := e.post("/v1/chat/completions", chat(true), nil)
+	rd := bufio.NewReader(resp.Body)
+	for {
+		line, err := rd.ReadString('\n')
+		if err != nil || strings.HasPrefix(line, "data: [DONE]") {
+			break
+		}
+	}
+	resp.Body.Close()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) && len(e.requestLogs()) == 0 {
+		time.Sleep(20 * time.Millisecond)
+	}
+	logs := e.requestLogs()
+	if len(logs) != 1 || logs[0]["status"].(float64) != 200 || logs[0]["result"] != "success" {
+		t.Fatalf("log = %v", logs)
 	}
 }
