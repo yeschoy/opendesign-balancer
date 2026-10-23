@@ -115,6 +115,13 @@ td.actions .btn + .btn { margin-left: 6px; }
 .form .hint { grid-column: 2; color: var(--muted); font-size: 12px; margin-top: -6px; }
 .form input[type=number] { width: 120px; }
 .form input[type=text], .form input:not([type]), .form select { width: 100%; max-width: 360px; }
+.head-row { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.head-row h2 { margin: 0; }
+.rules-table td { vertical-align: top; }
+.rules-table tr.off td { opacity: .5; }
+.rules-table .acc-sub { white-space: normal; }
+.form textarea { width: 100%; max-width: 360px; font: inherit; }
+.form .sect { grid-column: 1 / -1; font-weight: 600; font-size: 13px; padding-top: 6px; border-top: 1px solid var(--line); }
 .check { display: flex; gap: 8px; align-items: center; }
 
 dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; background: var(--panel); color: var(--text); width: min(560px, calc(100vw - 32px)); box-shadow: 0 20px 60px rgba(0,0,0,.25); }

@@ -47,6 +47,7 @@ type ClientKey struct {
 	Group     string    `json:"group"`
 	KeyHash   string    `json:"keyHash"`
 	KeyPrefix string    `json:"keyPrefix"`
+	Key       string    `json:"key,omitempty"` // plaintext so the admin can copy it again; empty for keys created before this field existed
 	Enabled   bool      `json:"enabled"`
 	CreatedAt time.Time `json:"createdAt"`
 }
@@ -59,6 +60,7 @@ type ImportKey struct {
 	Group     string    `json:"group"` // the group imported accounts join when the request names none
 	KeyHash   string    `json:"keyHash"`
 	KeyPrefix string    `json:"keyPrefix"`
+	Key       string    `json:"key,omitempty"` // plaintext so the admin can copy it again; empty for keys created before this field existed
 	Enabled   bool      `json:"enabled"`
 	CreatedAt time.Time `json:"createdAt"`
 }

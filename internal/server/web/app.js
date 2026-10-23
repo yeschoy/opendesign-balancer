@@ -33,6 +33,21 @@ function fmtDur(sec) {
   if (sec % 3600 === 0) return sec / 3600 + ' 小时';
   return Math.round(sec / 60) + ' 分钟';
 }
+// navigator.clipboard only exists on https/localhost; the admin is often served over plain http.
+function copyText(text) {
+  const ok = () => toast('已复制');
+  const legacy = () => {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.cssText = 'position:fixed;opacity:0';
+    document.body.appendChild(ta); ta.select();
+    let done = false;
+    try { done = document.execCommand('copy'); } catch (e) { /* fall through */ }
+    ta.remove();
+    done ? ok() : toast('复制失败，请手动选择密钥');
+  };
+  if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(ok, legacy); else legacy();
+}
+
 function toast(msg) {
   const t = $('#toast');
   t.textContent = msg;
@@ -495,13 +510,14 @@ async function loadKeys() {
   $('#key-table tbody').innerHTML = d.keys.map((k) => `<tr data-id="${esc(k.id)}">
     <td>${esc(k.name || '—')}</td><td><span class="badge">${esc(k.group)}</span></td><td><code>${esc(k.keyPrefix)}</code></td>
     <td><span class="badge ${k.enabled ? 'ok' : ''}">${k.enabled ? '启用' : '停用'}</span></td><td class="num">${esc(fmtTime(k.createdAt, true))}</td>
-    <td class="actions"><button class="btn small" data-k="toggle">${k.enabled ? '停用' : '启用'}</button><button class="btn small" data-k="edit">编辑</button><button class="btn small danger" data-k="del">删除</button></td></tr>`).join('');
+    <td class="actions"><button class="btn small" data-k="copy"${k.key ? '' : ' disabled title="该密钥创建于支持复制之前，无法找回，请新建"'}>复制</button><button class="btn small" data-k="toggle">${k.enabled ? '停用' : '启用'}</button><button class="btn small" data-k="edit">编辑</button><button class="btn small danger" data-k="del">删除</button></td></tr>`).join('');
   $('#key-empty').classList.toggle('hidden', d.keys.length > 0);
   await loadImportKeys();
   $$('#key-table [data-k]').forEach((b) => b.addEventListener('click', async () => {
     const id = b.closest('tr').dataset.id;
     const k = d.keys.find((x) => x.id === id);
     try {
+      if (b.dataset.k === 'copy') return copyText(k.key);
       if (b.dataset.k === 'toggle') await api('PUT', `/api/client-keys/${id}`, { enabled: !k.enabled });
       if (b.dataset.k === 'del') {
         if (await modal({ title: '删除下游密钥', body: `<p>删除后使用 <code>${esc(k.keyPrefix)}</code> 的调用方会立即 401。</p>`, buttons: [{ label: '取消', value: 'c' }, { label: '删除', value: 'd', danger: true }] }) !== 'd') return;
@@ -522,8 +538,8 @@ $('#btn-new-key').addEventListener('click', async () => {
     buttons: [{ label: '关闭', value: 'c' }, { label: '创建', value: 'ok', primary: true, action: async () => {
       if (created) return false;
       created = await api('POST', '/api/client-keys', { name: $('#k-name').value, group: $('#k-group').value });
-      $('#k-out').innerHTML = `<p class="mt"><b>请立即复制，关闭后无法再次查看：</b></p><div class="keybox"><code>${esc(created.key)}</code><button type="button" class="btn small" id="k-copy">复制</button></div>`;
-      $('#k-copy').onclick = () => navigator.clipboard.writeText(created.key).then(() => toast('已复制'));
+      $('#k-out').innerHTML = `<p class="mt"><b>密钥已创建，可随时在列表中复制：</b></p><div class="keybox"><code>${esc(created.key)}</code><button type="button" class="btn small" id="k-copy">复制</button></div>`;
+      $('#k-copy').onclick = () => copyText(created.key);
       return false;
     } }] });
   loadKeys().catch(() => {});
@@ -537,12 +553,13 @@ async function loadImportKeys() {
   $('#ik-table tbody').innerHTML = d.keys.map((k) => `<tr data-id="${esc(k.id)}">
     <td>${esc(k.name || '—')}</td><td><span class="badge">${esc(k.group)}</span></td><td><code>${esc(k.keyPrefix)}</code></td>
     <td><span class="badge ${k.enabled ? 'ok' : ''}">${k.enabled ? '启用' : '停用'}</span></td><td class="num">${esc(fmtTime(k.createdAt, true))}</td>
-    <td class="actions"><button class="btn small" data-k="toggle">${k.enabled ? '停用' : '启用'}</button><button class="btn small" data-k="edit">编辑</button><button class="btn small danger" data-k="del">删除</button></td></tr>`).join('');
+    <td class="actions"><button class="btn small" data-k="copy"${k.key ? '' : ' disabled title="该密钥创建于支持复制之前，无法找回，请新建"'}>复制</button><button class="btn small" data-k="toggle">${k.enabled ? '停用' : '启用'}</button><button class="btn small" data-k="edit">编辑</button><button class="btn small danger" data-k="del">删除</button></td></tr>`).join('');
   $('#ik-empty').classList.toggle('hidden', d.keys.length > 0);
   $$('#ik-table [data-k]').forEach((b) => b.addEventListener('click', async () => {
     const id = b.closest('tr').dataset.id;
     const k = d.keys.find((x) => x.id === id);
     try {
+      if (b.dataset.k === 'copy') return copyText(k.key);
       if (b.dataset.k === 'toggle') await api('PUT', `/api/import-keys/${id}`, { enabled: !k.enabled });
       if (b.dataset.k === 'del') {
         if (await modal({ title: '删除导入密钥', body: `<p>删除后使用 <code>${esc(k.keyPrefix)}</code> 的自动上号脚本会立即 401。已导入的账号不受影响。</p>`, buttons: [{ label: '取消', value: 'c' }, { label: '删除', value: 'd', danger: true }] }) !== 'd') return;
@@ -563,8 +580,8 @@ $('#btn-new-import-key').addEventListener('click', async () => {
     buttons: [{ label: '关闭', value: 'c' }, { label: '创建', value: 'ok', primary: true, action: async () => {
       if (created) return false;
       created = await api('POST', '/api/import-keys', { name: $('#ik-name').value, group: $('#ik-group').value });
-      $('#ik-out').innerHTML = `<p class="mt"><b>请立即复制，关闭后无法再次查看：</b></p><div class="keybox"><code>${esc(created.key)}</code><button type="button" class="btn small" id="ik-copy">复制</button></div>`;
-      $('#ik-copy').onclick = () => navigator.clipboard.writeText(created.key).then(() => toast('已复制'));
+      $('#ik-out').innerHTML = `<p class="mt"><b>密钥已创建，可随时在列表中复制：</b></p><div class="keybox"><code>${esc(created.key)}</code><button type="button" class="btn small" id="ik-copy">复制</button></div>`;
+      $('#ik-copy').onclick = () => copyText(created.key);
       return false;
     } }] });
   loadImportKeys().catch(() => {});
@@ -640,6 +657,126 @@ function readForm(fields, prefix, base) {
   }
   return out;
 }
+// ---- error / retry rules (visual editor) ----
+const clone = (v) => JSON.parse(JSON.stringify(v));
+let errRules = [], retRules = [];
+const SCOPES = { account: '整个账号', model: '账号 × 模型', funding: '同一付费来源的所有模型' };
+const ACTIONS = { ignore: '忽略（不扣分、不换号）', degrade: '仅降级（扣健康分）', cooldown: '冷却', 'hard-quarantine': '隔离（需人工处理）' };
+const RESET_FORMATS = { '': '不读响应头', 'retry-after': 'Retry-After（秒数或日期）', 'unix-seconds': 'Unix 秒时间戳', 'unix-milliseconds': 'Unix 毫秒时间戳', duration: '时长（如 30s）' };
+const lines = (t) => String(t || '').split('\n').map((x) => x.trim()).filter(Boolean);
+const matchSummary = (w) => {
+  const parts = [];
+  if ((w.statuses || []).length) parts.push(`状态码 ${w.statuses.join(' / ')}`);
+  if ((w.bodyContains || []).length) parts.push(`正文含 ${w.bodyContains.map((x) => '“' + x + '”').join(' 或 ')}`);
+  Object.entries(w.headers || {}).forEach(([k, v]) => parts.push(v ? `响应头 ${k} 含 “${v}”` : `带响应头 ${k}`));
+  return parts.length ? parts.map((x) => `<div>${esc(x)}</div>`).join('') : '<span class="muted">（无条件，不会命中）</span>';
+};
+function errActionHTML(r) {
+  const act = { ignore: ['忽略', ''], degrade: ['仅降级', 'warn'], cooldown: ['冷却', 'warn'], 'hard-quarantine': ['隔离', 'bad'] }[r.action] || [r.action, ''];
+  let sub = SCOPES[r.scope] || r.scope;
+  if (r.action === 'cooldown' && r.reset) sub += `，默认 ${r.reset.fallback}${r.reset.max ? '，最长 ' + r.reset.max : ''}${r.reset.escalate ? '，连续命中翻倍' : ''}`;
+  if (r.refreshQuota) sub += '，并刷新额度';
+  if (r.downstreamStatus) sub += `，回给下游 ${r.downstreamStatus}`;
+  return `<span class="badge ${act[1]}">${esc(act[0])}</span><div class="acc-sub">${esc(sub)}</div>`;
+}
+function renderRules() {
+  const btns = (i, n) => `<button class="btn small" data-r="up" ${i === 0 ? 'disabled' : ''} title="上移">↑</button><button class="btn small" data-r="down" ${i === n - 1 ? 'disabled' : ''} title="下移">↓</button><button class="btn small" data-r="toggle">`;
+  $('#rules-error tbody').innerHTML = errRules.map((r, i) => `<tr data-i="${i}" class="${r.disabled ? 'off' : ''}">
+    <td class="num">${i + 1}</td><td><b>${esc(r.id)}</b>${r.disabled ? ' <span class="badge">已停用</span>' : ''}<div class="acc-sub">${esc(r.note || '')}</div></td>
+    <td>${matchSummary(r.when || {})}</td><td>${errActionHTML(r)}</td>
+    <td class="actions">${btns(i, errRules.length)}${r.disabled ? '启用' : '停用'}</button><button class="btn small" data-r="edit">编辑</button><button class="btn small danger" data-r="del">删除</button></td></tr>`).join('');
+  $('#rules-retry tbody').innerHTML = retRules.map((r, i) => `<tr data-i="${i}" class="${r.disabled ? 'off' : ''}">
+    <td class="num">${i + 1}</td><td><b>${esc(r.id)}</b>${r.disabled ? ' <span class="badge">已停用</span>' : ''}<div class="acc-sub">${esc(r.note || '')}</div></td>
+    <td>${matchSummary(r.when || {})}</td>
+    <td class="actions">${btns(i, retRules.length)}${r.disabled ? '启用' : '停用'}</button><button class="btn small" data-r="edit">编辑</button><button class="btn small danger" data-r="del">删除</button></td></tr>`).join('');
+  $('#rules-error-empty').classList.toggle('hidden', errRules.length > 0);
+  $('#rules-retry-empty').classList.toggle('hidden', retRules.length > 0);
+}
+function bindRuleTable(sel, list, kind) {
+  $(sel).addEventListener('click', async (ev) => {
+    const b = ev.target.closest('button[data-r]');
+    if (!b) return;
+    const arr = list();
+    const i = Number(b.closest('tr').dataset.i);
+    const act = b.dataset.r;
+    if (act === 'up' || act === 'down') {
+      const j = act === 'up' ? i - 1 : i + 1;
+      [arr[i], arr[j]] = [arr[j], arr[i]];
+    } else if (act === 'toggle') {
+      arr[i].disabled = !arr[i].disabled || undefined;
+    } else if (act === 'del') {
+      if (await modal({ title: '删除规则', body: `<p>删除规则 <b>${esc(arr[i].id)}</b>？保存设置后生效。</p>`, buttons: [{ label: '取消', value: 'c' }, { label: '删除', value: 'd', danger: true }] }) !== 'd') return;
+      arr.splice(i, 1);
+    } else if (act === 'edit') {
+      await editRule(kind, arr, i);
+    }
+    renderRules();
+  });
+}
+bindRuleTable('#rules-error', () => errRules, 'error');
+bindRuleTable('#rules-retry', () => retRules, 'retry');
+$('#btn-add-error-rule').addEventListener('click', async () => { await editRule('error', errRules, -1); renderRules(); });
+$('#btn-add-retry-rule').addEventListener('click', async () => { await editRule('retry', retRules, -1); renderRules(); });
+
+async function editRule(kind, arr, idx) {
+  const isErr = kind === 'error';
+  const r = idx >= 0 ? clone(arr[idx]) : (isErr ? { id: '', scope: 'account', action: 'cooldown', when: {}, reset: { fallback: '30s' } } : { id: '', decision: 'stop', when: {} });
+  const w = r.when || {};
+  const rs = r.reset || {};
+  const opts = (m, v) => Object.entries(m).map(([k, t]) => `<option value="${esc(k)}" ${k === v ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  const hdrs = Object.entries(w.headers || {}).map(([k, v]) => v ? `${k}: ${v}` : k).join('\n');
+  const body = `<div class="form">
+    <label>规则名称</label><input id="r-id" value="${esc(r.id)}" placeholder="如 rate-limited（字母数字 _ . -）">
+    <label>备注</label><input id="r-note" value="${esc(r.note || '')}">
+    <div class="sect">命中条件（多项同时满足；每项内部任一即可）</div>
+    <label>状态码</label><input id="r-st" value="${esc((w.statuses || []).join(', '))}" placeholder="如 429, 503，逗号分隔"><span class="hint">留空表示不限状态码</span>
+    <label>正文包含</label><textarea id="r-body" rows="3" placeholder="每行一个关键字，不区分大小写">${esc((w.bodyContains || []).join('\n'))}</textarea><span class="hint">响应正文含其中任意一个即命中</span>
+    <label>响应头</label><textarea id="r-hdr" rows="2" placeholder="每行一个：Header: 子串（子串可省略）">${esc(hdrs)}</textarea>
+    ${isErr ? `<div class="sect">处理方式</div>
+    <label>作用范围</label><select id="r-scope">${opts(SCOPES, r.scope)}</select>
+    <label>动作</label><select id="r-action">${opts(ACTIONS, r.action)}</select>
+    <div id="r-reset" class="form" style="grid-column:1/-1;grid-template-columns:120px 1fr">
+      <label>默认冷却</label><input id="r-fb" value="${esc(rs.fallback || '')}" placeholder="如 30s、10m、24h"><span class="hint">读不到恢复时间时使用</span>
+      <label>最长冷却</label><input id="r-max" value="${esc(rs.max || '')}" placeholder="如 8d，可留空"><span class="hint">支持 s / m / h / d</span>
+      <label>读取响应头</label><input id="r-rh" value="${esc(rs.header || '')}" placeholder="如 Retry-After，可留空">
+      <label>响应头格式</label><select id="r-rf">${opts(RESET_FORMATS, rs.format || '')}</select>
+      <label>正文时间前缀</label><textarea id="r-ba" rows="2" placeholder="每行一个，如 try again after">${esc((rs.bodyAfter || []).join('\n'))}</textarea><span class="hint">正文中这些词后面跟的 RFC3339 时间作为恢复时间</span>
+      <span></span><label class="check"><input type="checkbox" id="r-esc" ${rs.escalate ? 'checked' : ''}>连续命中时冷却翻倍（成功一次清零）</label>
+    </div>
+    <span></span><label class="check"><input type="checkbox" id="r-rq" ${r.refreshQuota ? 'checked' : ''}>同时立即刷新该账号额度</label>
+    <label>回给下游状态码</label><input id="r-ds" type="number" value="${r.downstreamStatus || ''}" placeholder="默认"><span class="hint">最后一次失败时返回给下游的状态码（400–599），留空用默认映射</span>` : ''}
+    <span></span><label class="check"><input type="checkbox" id="r-off" ${r.disabled ? 'checked' : ''}>停用此规则</label>
+  </div>`;
+  await modal({ title: (idx >= 0 ? '编辑' : '添加') + (isErr ? '错误规则' : '重试规则'), body, wide: true,
+    onOpen: isErr ? () => { const sync = () => { $('#r-reset').style.display = $('#r-action').value === 'cooldown' ? '' : 'none'; }; $('#r-action').addEventListener('change', sync); sync(); } : undefined,
+    buttons: [{ label: '取消', value: 'c' }, { label: '确定', value: 'ok', primary: true, action: () => {
+      const out = { ...r, id: $('#r-id').value.trim(), note: $('#r-note').value.trim() || undefined, disabled: $('#r-off').checked || undefined };
+      if (!out.id) throw new Error('规则名称必填');
+      if (arr.some((x, j) => j !== idx && x.id === out.id)) throw new Error('规则名称重复');
+      const statuses = $('#r-st').value.split(/[,，\s]+/).filter(Boolean).map(Number);
+      if (statuses.some((n) => !Number.isInteger(n) || n < 100 || n > 599)) throw new Error('状态码必须是 100–599 的整数');
+      const headers = {};
+      lines($('#r-hdr').value).forEach((l) => { const k = l.indexOf(':'); if (k < 0) headers[l] = ''; else headers[l.slice(0, k).trim()] = l.slice(k + 1).trim(); });
+      out.when = { statuses: statuses.length ? statuses : undefined, bodyContains: lines($('#r-body').value).length ? lines($('#r-body').value) : undefined, headers: Object.keys(headers).length ? headers : undefined };
+      if (!statuses.length && !out.when.bodyContains && !out.when.headers) throw new Error('至少设置一个命中条件');
+      if (isErr) {
+        out.scope = $('#r-scope').value; out.action = $('#r-action').value;
+        out.refreshQuota = $('#r-rq').checked || undefined;
+        const ds = parseInt($('#r-ds').value || '0', 10);
+        if (ds && (ds < 400 || ds > 599)) throw new Error('下游状态码必须在 400–599');
+        out.downstreamStatus = ds || undefined;
+        if (out.action === 'cooldown') {
+          if (!$('#r-fb').value.trim()) throw new Error('冷却动作必须填默认冷却时长');
+          const rh = $('#r-rh').value.trim(), rf = $('#r-rf').value;
+          if (rh && !rf) throw new Error('填了响应头就要选响应头格式');
+          out.reset = { header: rh || undefined, format: rf || undefined, bodyAfter: lines($('#r-ba').value).length ? lines($('#r-ba').value) : undefined,
+            fallback: $('#r-fb').value.trim(), max: $('#r-max').value.trim() || undefined, escalate: $('#r-esc').checked || undefined };
+        } else delete out.reset;
+      }
+      if (idx >= 0) arr[idx] = out; else arr.push(out);
+    } }] });
+}
+
 async function loadSettings() {
   settingsCache = await api('GET', '/api/settings');
   const s = settingsCache.settings;
@@ -647,22 +784,23 @@ async function loadSettings() {
   renderForm($('#form-quota'), QUOTA_FIELDS, s.quota, 'qt');
   renderForm($('#form-logs'), LOG_FIELDS, s.logs, 'lg');
   $('#rt-strategy').addEventListener('change', (e) => { $('#rt-strategy-hint').textContent = STRATEGY_HINTS[e.target.value] || ''; });
-  $('#rules-error').value = JSON.stringify(s.errorRules, null, 2);
-  $('#rules-retry').value = JSON.stringify(s.retryRules, null, 2);
+  errRules = clone(s.errorRules || []);
+  retRules = clone(s.retryRules || []);
+  renderRules();
   $('#set-rev').textContent = '配置版本 ' + s.revision;
   const ov = await api('GET', '/api/overview');
   $('#pv-group').innerHTML = (ov.groups.length ? ov.groups : ['default']).map((g) => `<option>${esc(g)}</option>`).join('');
 }
 $('#btn-save-settings').addEventListener('click', async () => {
   const s = settingsCache.settings;
-  let errorRules, retryRules;
-  try { errorRules = JSON.parse($('#rules-error').value); retryRules = JSON.parse($('#rules-retry').value); } catch (e) { toast('规则 JSON 格式错误：' + e.message); return; }
+  const errorRules = errRules, retryRules = retRules;
   const body = { revision: s.revision, upstream: s.upstream, routing: readForm(ROUTING_FIELDS, 'rt', s.routing), quota: readForm(QUOTA_FIELDS, 'qt', s.quota), logs: readForm(LOG_FIELDS, 'lg', s.logs), errorRules, retryRules };
   try { await api('PUT', '/api/settings', body); toast('已保存'); loadSettings(); } catch (e) { toast(e.message); }
 });
 $('#btn-default-rules').addEventListener('click', () => {
-  $('#rules-error').value = JSON.stringify(settingsCache.defaults.errorRules, null, 2);
-  $('#rules-retry').value = JSON.stringify(settingsCache.defaults.retryRules, null, 2);
+  errRules = clone(settingsCache.defaults.errorRules);
+  retRules = clone(settingsCache.defaults.retryRules);
+  renderRules();
   toast('已填入默认规则，保存后生效');
 });
 $('#btn-preview').addEventListener('click', async () => {

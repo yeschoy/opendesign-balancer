@@ -537,12 +537,13 @@ func (s *Server) apiImportKeys(w http.ResponseWriter, r *http.Request) {
 		Name      string    `json:"name"`
 		Group     string    `json:"group"`
 		KeyPrefix string    `json:"keyPrefix"`
+		Key       string    `json:"key,omitempty"`
 		Enabled   bool      `json:"enabled"`
 		CreatedAt time.Time `json:"createdAt"`
 	}
 	out := []view{}
 	for _, k := range cfg.ImportKeys {
-		out = append(out, view{k.ID, k.Name, k.Group, k.KeyPrefix, k.Enabled, k.CreatedAt})
+		out = append(out, view{k.ID, k.Name, k.Group, k.KeyPrefix, k.Key, k.Enabled, k.CreatedAt})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revision": cfg.Revision, "keys": out})
 }
@@ -558,12 +559,11 @@ func (s *Server) apiCreateImportKey(w http.ResponseWriter, r *http.Request) {
 	}
 	key := importKeyPrefix + randHex(24)
 	k := config.ImportKey{ID: config.NewID("ik_"), Name: strings.TrimSpace(in.Name), Group: strings.TrimSpace(in.Group),
-		KeyHash: config.HashKey(key), KeyPrefix: key[:len(importKeyPrefix)+4] + "…" + key[len(key)-4:], Enabled: true, CreatedAt: time.Now().UTC()}
+		KeyHash: config.HashKey(key), KeyPrefix: key[:len(importKeyPrefix)+4] + "…" + key[len(key)-4:], Key: key, Enabled: true, CreatedAt: time.Now().UTC()}
 	if _, err := s.cfg.Update(-1, func(c *config.Config) error { c.ImportKeys = append(c.ImportKeys, k); return nil }); err != nil {
 		s.configError(w, err)
 		return
 	}
-	// the only time the key is shown
 	writeJSON(w, http.StatusOK, map[string]any{"id": k.ID, "key": key})
 }
 
