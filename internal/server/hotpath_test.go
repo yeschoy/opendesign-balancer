@@ -186,3 +186,20 @@ func TestStreamUsageAfterNullUsageChunks(t *testing.T) {
 		t.Fatalf("usage not read from the last chunk: %v", logs)
 	}
 }
+
+func TestAgentSessionHeadersAreExplicit(t *testing.T) {
+	s := &Server{secret: []byte("k")}
+	cfg := config.Default()
+	for _, name := range []string{"x-deepseek-harness-session-id", "X-Opencode-Session", "Agent-Session-Id", "x-litellm-session-id", "X-Task-ID", "X-KILOCODE-TASKID", "x-grok-conv-id", "X-Session-Affinity"} {
+		h := http.Header{}
+		h.Set(name, "abc-123")
+		id := s.identity(cfg, "g", h, map[string]any{})
+		if id.Confidence != "explicit" || id.Source != "header" {
+			t.Errorf("%s: %+v", name, id)
+		}
+	}
+	body := map[string]any{"metadata": map[string]any{"sessionId": "qwen-1"}}
+	if id := s.identity(cfg, "g", http.Header{}, body); id.Confidence != "explicit" || id.KeyType != "session_id" {
+		t.Errorf("metadata.sessionId: %+v", id)
+	}
+}

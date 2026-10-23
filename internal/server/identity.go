@@ -38,6 +38,15 @@ var sessionHeaders = []struct{ name, keyType string }{
 	{"Conversation-Id", "conversation_id"},
 	{"Conversation_id", "conversation_id"},
 	{"X-Conversation-Id", "conversation_id"},
+	// agents that name their own header (read from their source, 2026-10)
+	{"X-Deepseek-Harness-Session-Id", "session_id"},
+	{"X-Opencode-Session", "session_id"},
+	{"Agent-Session-Id", "session_id"}, // Goose
+	{"X-Litellm-Session-Id", "session_id"},
+	{"X-Http-Session-Id", "session_id"},
+	{"X-Grok-Conv-Id", "conversation_id"},
+	{"X-Task-Id", "task_id"}, // Cline
+	{"X-Kilocode-Taskid", "task_id"},
 }
 
 var bodyKeys = []struct{ path, keyType string }{
@@ -48,6 +57,7 @@ var bodyKeys = []struct{ path, keyType string }{
 	{"metadata.session_id", "session_id"},
 	{"metadata.conversation_id", "conversation_id"},
 	{"metadata.thread_id", "thread_id"},
+	{"metadata.sessionId", "session_id"}, // Qwen Code on DashScope
 }
 
 func validValue(v string) (string, bool) {
