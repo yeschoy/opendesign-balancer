@@ -209,28 +209,36 @@ func (s *Stats) Export() Export {
 	return e
 }
 
+// withPrompt fills Prompt for buckets recorded before it existed: those
+// requests reported input including the cache hits, so the prompt is the input.
+func withPrompt(b Bucket) Bucket {
+	if b.Prompt == 0 {
+		b.Prompt = b.Input
+	}
+	return b
+}
+
 func (s *Stats) Import(e Export) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	for _, b := range e.Global {
-		s.global[b.Minute%1440] = b
-	}
-	for id, l := range e.Accounts {
+	load := func(l []Bucket) *ring {
 		r := &ring{}
 		for _, b := range l {
-			r[b.Minute%1440] = b
+			r[b.Minute%1440] = withPrompt(b)
 		}
-		s.account[id] = r
+		return r
+	}
+	for _, b := range e.Global {
+		s.global[b.Minute%1440] = withPrompt(b)
+	}
+	for id, l := range e.Accounts {
+		s.account[id] = load(l)
 	}
 	for name, l := range e.Models {
 		if len(s.model) >= maxModels {
 			break
 		}
-		r := &ring{}
-		for _, b := range l {
-			r[b.Minute%1440] = b
-		}
-		s.model[name] = r
+		s.model[name] = load(l)
 	}
 }
 

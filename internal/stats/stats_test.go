@@ -28,3 +28,13 @@ func TestPerModelAndHitRateFields(t *testing.T) {
 		t.Fatalf("%d model rings", n)
 	}
 }
+
+func TestImportBackfillsPromptForOldBuckets(t *testing.T) {
+	s := New()
+	m := s.now().Unix() / 60
+	s.Import(Export{Global: []Bucket{{Minute: m, Requests: 1, Input: 1000, Cached: 900}, {Minute: m - 1, Requests: 1, Input: 500, Cached: 100, Prompt: 500}}})
+	tot := s.Summary().Total
+	if tot.Prompt != 1500 || tot.Cached != 1000 {
+		t.Fatalf("total = %+v", tot)
+	}
+}
