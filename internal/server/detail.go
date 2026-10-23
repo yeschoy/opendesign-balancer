@@ -1,6 +1,7 @@
 package server
 
 import (
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -71,20 +72,30 @@ func maskHeaders(cfg *config.Config, h http.Header) map[string][]string {
 	return out
 }
 
-func maskBody(cfg *config.Config, b []byte, max int) (string, bool) {
-	cut := len(b) > max
-	if cut {
-		b = b[:max]
+// clipMiddle keeps the first and last max/2 bytes of b: a long chat's end
+// (the latest turn and the answer) matters as much as its start.
+func clipMiddle(b []byte, max int) ([]byte, bool) {
+	if len(b) <= max {
+		return b, false
 	}
-	return redactSecrets(cfg, strings.ToValidUTF8(string(b), "�")), cut
+	h := max / 2
+	out := append([]byte(nil), b[:h]...)
+	out = append(out, fmt.Sprintf("\n…[省略 %d 字节]…\n", len(b)-2*h)...)
+	return append(out, b[len(b)-h:]...), true
 }
 
-// captureWriter keeps the status and the first max bytes of what goes to the client.
+func maskBody(cfg *config.Config, b []byte, max int) (string, bool) {
+	b, cut := clipMiddle(b, max)
+	return redactSecrets(cfg, strings.ToValidUTF8(string(b), "\uFFFD")), cut
+}
+
+// captureWriter keeps the status and the first and last max/2 bytes of what goes to the client.
 type captureWriter struct {
 	http.ResponseWriter
 	max    int
 	status int
-	buf    []byte
+	head   []byte
+	tail   []byte
 	n      int
 }
 
@@ -99,12 +110,36 @@ func (c *captureWriter) Write(b []byte) (int, error) {
 	if c.status == 0 {
 		c.status = http.StatusOK
 	}
-	if room := c.max - len(c.buf); room > 0 {
-		c.buf = append(c.buf, b[:min(room, len(b))]...)
+	h := c.max / 2
+	rest := b
+	if room := h - len(c.head); room > 0 {
+		k := min(room, len(rest))
+		c.head, rest = append(c.head, rest[:k]...), rest[k:]
+	}
+	if len(rest) > 0 {
+		c.tail = append(c.tail, rest...)
+		if len(c.tail) > 2*h {
+			c.tail = append(c.tail[:0], c.tail[len(c.tail)-h:]...)
+		}
 	}
 	n, err := c.ResponseWriter.Write(b)
 	c.n += n
 	return n, err
+}
+
+// body is what was captured, with the omitted middle marked.
+func (c *captureWriter) body() ([]byte, bool) {
+	h := c.max / 2
+	tail := c.tail
+	if len(tail) > h {
+		tail = tail[len(tail)-h:]
+	}
+	if len(c.head)+len(tail) >= c.n {
+		return append(append([]byte(nil), c.head...), tail...), false
+	}
+	out := append([]byte(nil), c.head...)
+	out = append(out, fmt.Sprintf("\n…[省略 %d 字节]…\n", c.n-len(c.head)-len(tail))...)
+	return append(out, tail...), true
 }
 
 // Unwrap lets http.NewResponseController reach the real writer to flush.

@@ -24,7 +24,7 @@ const (
 	segmentBytes = 5 << 20
 	maxRecord    = 64 << 10
 	// detail records carry bodies, so they may be larger
-	maxDetailRecord = 2 << 20
+	maxDetailRecord = 6 << 20
 	// queries read the in-memory ring, so the files may trail it this long
 	flushEvery = time.Second
 )

@@ -690,3 +690,23 @@ func TestRequestLogCarriesCacheRateAndCost(t *testing.T) {
 		t.Fatalf("unpriced log = %v", u)
 	}
 }
+
+func TestDetailCaptureKeepsHeadAndTail(t *testing.T) {
+	cw := &captureWriter{ResponseWriter: httptest.NewRecorder(), max: 20}
+	for _, part := range []string{"0123456789", "abcdefghij", "ABCDEFGHIJ", "klmnopqrst"} {
+		cw.Write([]byte(part))
+	}
+	b, cut := cw.body()
+	s := string(b)
+	if !cut || !strings.HasPrefix(s, "0123456789") || !strings.HasSuffix(s, "klmnopqrst") || !strings.Contains(s, "省略 20 字节") {
+		t.Fatalf("body = %q cut=%v", s, cut)
+	}
+	short := &captureWriter{ResponseWriter: httptest.NewRecorder(), max: 20}
+	short.Write([]byte("hello"))
+	if b, cut := short.body(); cut || string(b) != "hello" {
+		t.Fatalf("short body = %q cut=%v", b, cut)
+	}
+	if b, cut := clipMiddle([]byte("0123456789abcdefghij0123"), 10); !cut || !strings.HasPrefix(string(b), "01234") || !strings.HasSuffix(string(b), "ij0123"[1:]) {
+		t.Fatalf("clipMiddle = %q", b)
+	}
+}

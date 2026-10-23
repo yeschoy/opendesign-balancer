@@ -630,7 +630,7 @@ const QUOTA_FIELDS = [
 ];
 const LOG_FIELDS = [
   ['retentionDays', '保留天数', 'int'], ['maxRequests', '请求日志条数', 'int'], ['maxErrors', '错误日志条数', 'int'], ['maxTotalMB', '总容量（MB）', 'int'],
-  ['detail', '详细日志', 'bool', '记录请求头/体、响应头/体（凭据已脱敏），排查完请关闭'], ['maxDetails', '详细日志条数', 'int'], ['detailBodyKB', '单个体上限（KB）', 'int', '超出部分截断'],
+  ['detail', '详细日志', 'bool', '记录请求头/体、响应头/体（凭据已脱敏），排查完请关闭'], ['maxDetails', '详细日志条数', 'int'], ['detailBodyKB', '单个体上限（KB）', 'int', '超出时保留头尾各一半、省略中间；内存约占 条数 × 上限 × 2，调大请同时调小条数'],
 ];
 function renderForm(el, fields, obj, prefix) {
   el.innerHTML = fields.map(([k, label, type, extra, hint]) => {
@@ -867,7 +867,7 @@ function cacheRateCell(r) {
     const total = r.inputTokens + (r.inboundProtocol === 'anthropic' ? r.cachedTokens : 0);
     v = total > 0 ? Math.min(r.cachedTokens / total, 1) : null;
   }
-  if (v === null || v === undefined) return '—';
+  if (v === null || v === undefined) return '<span class="acc-sub">—</span>';
   return `<span class="badge ${v >= 0.8 ? 'ok' : v >= 0.3 ? '' : 'warn'}">${(v * 100).toFixed(1)}%</span>`;
 }
 const CUR = { CNY: '¥', USD: '$' };
@@ -879,8 +879,8 @@ function requestRow(r) {
     <td>${esc(r.accountName || '—')}${r.switched ? ' <span class="badge warn">换号</span>' : ''}${r.overflow ? ' <span class="badge warn">溢出</span>' : ''}</td>
     <td>${statusBadge(r.status, r.result)}${r.upstreamStatus && r.upstreamStatus !== r.status ? `<div class="acc-sub">上游 ${esc(r.upstreamStatus)}</div>` : ''}${r.errorCategory ? `<div class="acc-sub">${esc(r.errorCategory)}${r.blockedBy ? '/' + esc(r.blockedBy) : ''}</div>` : ''}</td>
     <td><span class="acc-sub">${esc(BIND[r.bindingResult] || r.bindingResult)}</span><div class="acc-sub">${esc(r.affinityKeyType)}</div></td>
-    <td class="num">${r.ttftMs === null || r.ttftMs === undefined ? '—' : num(r.ttftMs) + 'ms'}</td><td class="num">${num(r.durationMs)}ms</td>
-    <td class="num">${tok}</td><td class="num">${cacheRateCell(r)}</td><td class="num">${costCell(r)}</td><td class="num">${r.attempts ? r.attempts.length : 0}</td></tr>`;
+    <td class="num">${r.ttftMs === null || r.ttftMs === undefined ? '—' : num(r.ttftMs) + 'ms'}</td><td class="num">${num(r.durationMs)}ms<div class="acc-sub">${costCell(r)}</div></td>
+    <td class="num">${tok}<div>${cacheRateCell(r)}</div></td><td class="num">${r.attempts ? r.attempts.length : 0}</td></tr>`;
 }
 function detailRow(d) {
   const sz = (n, cut) => num(n) + ' B' + (cut ? ' <span class="badge warn">截断</span>' : '');

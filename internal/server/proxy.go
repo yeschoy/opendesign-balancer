@@ -283,10 +283,9 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				AccountID: rec.AccountID, Status: status, RequestHeaders: maskHeaders(cfg, reqHeader), RequestBodyBytes: len(reqBody),
 				ResponseHeaders: maskHeaders(cfg, cw.Header()), ResponseBodyBytes: cw.n}
 			d.RequestBody, d.RequestBodyTruncated = maskBody(cfg, reqBody, max)
-			d.ResponseBody, d.ResponseBodyTruncated = maskBody(cfg, cw.buf, max)
-			if cw.n > len(cw.buf) {
-				d.ResponseBodyTruncated = true
-			}
+			respBody, cut := cw.body()
+			d.ResponseBody, _ = maskBody(cfg, respBody, len(respBody))
+			d.ResponseBodyTruncated = cut
 			s.logs.Append("details", rec.TS, d)
 		}
 		s.stats.Record(rec.AccountID, result, rec.InputTokens, rec.OutputTokens, rec.CachedTokens, rec.Currency, cost)
