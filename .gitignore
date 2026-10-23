@@ -1,0 +1,13 @@
+# 运行数据（含密钥）
+/data/
+/odb
+/bin/
+*.tmp
+# 临时产物记录
+/_tmp_artifacts.md
+# node / pnpm
+node_modules/
+package-lock.json
+pnpm-lock.yaml
+.pnpm-store/
+.env

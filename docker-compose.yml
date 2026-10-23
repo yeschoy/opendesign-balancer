@@ -1,0 +1,29 @@
+services:
+  opendesign-balancer:
+    build: .
+    image: opendesign-balancer:latest
+    container_name: opendesign-balancer
+    restart: unless-stopped
+    # the app drains in-flight requests for up to 30s on SIGTERM
+    stop_grace_period: 35s
+    # run as the host user so ./data stays readable and backup-able on the host
+    user: "${ODB_UID:-1000}:${ODB_GID:-1000}"
+    environment:
+      - ODB_ADMIN_PASSWORD=${ODB_ADMIN_PASSWORD:-}
+      - TZ=Asia/Shanghai
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8790:8790"
+    networks:
+      - ai-internal
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:8790/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+networks:
+  # shared with new-api: it reaches this service as http://opendesign-balancer:8790
+  ai-internal:
+    external: true

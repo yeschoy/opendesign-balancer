@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenDesign 账号池</title>
+<link rel="stylesheet" href="/assets/app.css">
+<script src="/assets/app.js" defer></script>
+</head>
+<body>
+<div id="auth" class="auth hidden">
+  <form id="auth-form" class="auth-card">
+    <div class="brand"><span class="logo">◆</span> OpenDesign 账号池</div>
+    <p id="auth-hint" class="muted"></p>
+    <input id="auth-password" type="password" autocomplete="current-password" placeholder="管理员密码" required minlength="8">
+    <input id="auth-password2" type="password" autocomplete="new-password" placeholder="再次输入密码" class="hidden" minlength="8">
+    <button class="btn primary" type="submit" id="auth-submit">登录</button>
+    <p id="auth-error" class="error"></p>
+  </form>
+</div>
+
+<div id="app" class="app hidden">
+  <aside class="side">
+    <div class="brand"><span class="logo">◆</span> 账号池</div>
+    <nav id="nav">
+      <a data-page="overview" class="active">概览</a>
+      <a data-page="accounts">账号</a>
+      <a data-page="keys">下游密钥</a>
+      <a data-page="routing">路由设置</a>
+      <a data-page="requests">请求日志</a>
+      <a data-page="errors">错误日志</a>
+    </nav>
+    <div class="side-foot">
+      <button class="btn ghost small" id="btn-password">修改密码</button>
+      <button class="btn ghost small" id="btn-logout">退出</button>
+    </div>
+  </aside>
+  <main>
+    <section id="page-overview" class="page">
+      <header class="page-head"><h1>概览</h1><span class="muted" id="ov-updated"></span></header>
+      <div id="ov-cards" class="cards"></div>
+      <div class="grid2">
+        <div class="panel"><h2>最近 24 小时请求</h2><div id="ov-chart" class="chart"></div><div class="legend"><span class="sw ok"></span>成功 <span class="sw bad"></span>失败 <span class="sw cancel"></span>取消</div></div>
+        <div class="panel"><h2>套餐窗口（按工作区去重）</h2><div id="ov-windows"></div><h2 class="mt">账号状态</h2><div id="ov-status" class="chips"></div></div>
+      </div>
+    </section>
+
+    <section id="page-accounts" class="page hidden">
+      <header class="page-head"><h1>账号</h1>
+        <div class="actions">
+          <select id="acc-group-filter"><option value="">全部分组</option></select>
+          <button class="btn" id="btn-refresh-acc">刷新</button>
+          <button class="btn" id="btn-import">批量导入</button>
+          <button class="btn" id="btn-add-manual">手动添加</button>
+          <button class="btn primary" id="btn-add-device">设备授权添加</button>
+        </div>
+      </header>
+      <div class="panel flush"><div class="table-wrap"><table class="table" id="acc-table">
+        <thead><tr><th>账号</th><th>状态</th><th>Design Plan 窗口</th><th>钱包 / 套餐模型额度</th><th>并发</th><th>RPM</th><th>健康</th><th>选中/绑定</th><th></th></tr></thead>
+        <tbody></tbody></table></div>
+        <p id="acc-empty" class="empty hidden">还没有账号。点「设备授权添加」，在已登录该账号的浏览器里批准即可。</p>
+      </div>
+      <div class="panel flush" id="stg-panel">
+        <h2 class="panel-title">暂存区 <span class="badge warn hidden" id="stg-count"></span> <span class="muted small">开放接口导入时与现有账号重复（运行密钥 / 控制密钥 / 名称相同）的账号先放在这里，确认覆盖后才写入</span></h2>
+        <div class="table-wrap"><table class="table" id="stg-table">
+          <thead><tr><th>导入的账号</th><th>密钥</th><th>导入时间</th><th>重复于</th><th></th></tr></thead><tbody></tbody></table></div>
+        <p id="stg-empty" class="empty hidden">暂存区为空。</p>
+      </div>
+    </section>
+
+    <section id="page-keys" class="page hidden">
+      <header class="page-head"><h1>下游密钥</h1><div class="actions"><button class="btn primary" id="btn-new-key">新建密钥</button></div></header>
+      <div class="panel flush"><div class="table-wrap"><table class="table" id="key-table">
+        <thead><tr><th>名称</th><th>分组</th><th>密钥</th><th>状态</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table></div>
+        <p id="key-empty" class="empty hidden">还没有下游密钥。new-api 需要一把密钥才能调用本服务。</p>
+      </div>
+      <header class="page-head mt"><h1>导入密钥</h1><div class="actions"><button class="btn primary" id="btn-new-import-key">新建导入密钥</button></div></header>
+      <div class="panel flush"><div class="table-wrap"><table class="table" id="ik-table">
+        <thead><tr><th>名称</th><th>默认分组</th><th>密钥</th><th>状态</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table></div>
+        <p id="ik-empty" class="empty hidden">还没有导入密钥。自动上号脚本需要一把 <code>sk-odbimp-…</code> 才能调用开放导入接口。</p>
+      </div>
+      <div class="panel">
+        <h2>开放导入接口（自动上号）</h2>
+        <ol class="howto">
+          <li><code>POST <span id="import-url"></span></code>，请求头 <code>Authorization: Bearer sk-odbimp-…</code>（或 <code>X-Import-Key</code>）。导入密钥只能导入账号，不能调用模型；下游密钥也不能导入。</li>
+          <li>请求体：<code>{"runtimeKey":"sk-amr-…","controlKey":"vela_ctrl_…","name":"账号名","group":"可选","note":"可选"}</code>；批量用 <code>{"accounts":[…]}</code>，每次最多 200 个。不填 <code>group</code> 时用导入密钥的默认分组。</li>
+          <li>没有重复的账号立即入池并启用，备注自动写入导入时间与所用密钥；运行密钥、控制密钥或名称与现有账号相同时进入「账号」页的暂存区（HTTP 202），由管理员确认覆盖、作为新账号添加或丢弃。完全相同的账号重复提交返回 <code>unchanged</code>。</li>
+          <li>响应 <code>{"added","staged","unchanged","failed","results":[{"index","status","accountId","stageId","conflicts","error"}]}</code>；全部失败时 400，鉴权失败 401，同一 IP 鉴权连续失败 5 次后 60 秒内 429。</li>
+        </ol>
+        <pre class="code" id="import-curl"></pre>
+      </div>
+      <div class="panel">
+        <h2>在 new-api 中接入</h2>
+        <ol class="howto">
+          <li>渠道类型选 <b>OpenAI</b>（Claude Code 走 <code>/v1/messages</code> 时可选 <b>Anthropic Claude</b>）。</li>
+          <li>Base URL 填 <code id="base-url"></code>，密钥填这里新建的 <code>sk-odb-…</code>。</li>
+          <li>模型列表可点 new-api 的「获取模型列表」，本服务会转发上游 <code>/v1/models</code>。</li>
+          <li>打开渠道的「透传请求头」，让 <code>X-Claude-Code-Session-Id</code>、<code>Session_id</code> 等会话头到达本服务，实现会话粘性。没有会话头时按首条 system/user 消息做弱粘性。</li>
+          <li>账号鉴权失败、额度耗尽不会以 401/402 回给 new-api（会被判定渠道失效），而是 502/503，new-api 会自动重试其他渠道。</li>
+        </ol>
+      </div>
+    </section>
+
+    <section id="page-routing" class="page hidden">
+      <header class="page-head"><h1>路由设置</h1><div class="actions"><span class="muted" id="set-rev"></span><button class="btn primary" id="btn-save-settings">保存</button></div></header>
+      <div class="grid2">
+        <div class="panel">
+          <h2>选号与会话粘性</h2>
+          <div class="form" id="form-routing"></div>
+        </div>
+        <div class="panel">
+          <h2>额度轮询</h2>
+          <div class="form" id="form-quota"></div>
+          <h2 class="mt">日志</h2>
+          <div class="form" id="form-logs"></div>
+          <h2 class="mt">选号预览</h2>
+          <div class="row">
+            <select id="pv-group"></select>
+            <input id="pv-model" placeholder="模型，如 claude-sonnet-5">
+            <button class="btn" id="btn-preview">预览</button>
+            <button class="btn ghost" id="btn-reset-counts">清零选中计数</button>
+          </div>
+          <div id="pv-result" class="muted small mt"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>错误规则 <span class="muted small">按顺序匹配，首条命中生效；未命中只记降级样本，不会冷却</span></h2>
+        <textarea id="rules-error" class="code" rows="16" spellcheck="false"></textarea>
+        <div class="row"><button class="btn ghost small" id="btn-default-rules">恢复默认规则</button></div>
+        <h2 class="mt">重试规则 <span class="muted small">命中后停止换号，原样返回</span></h2>
+        <textarea id="rules-retry" class="code" rows="6" spellcheck="false"></textarea>
+      </div>
+    </section>
+
+    <section id="page-requests" class="page hidden">
+      <header class="page-head"><h1>请求日志</h1>
+        <div class="actions">
+          <select id="rq-account"><option value="">全部账号</option></select>
+          <select id="rq-result"><option value="">全部结果</option><option value="success">成功</option><option value="failed">失败</option><option value="client_cancelled">取消</option></select>
+          <input id="rq-model" placeholder="模型" size="14">
+          <input id="rq-status" placeholder="状态码" size="6">
+          <button class="btn" id="btn-rq-search">查询</button>
+          <button class="btn ghost" id="btn-rq-clear">清空</button>
+        </div>
+      </header>
+      <div class="panel flush"><div class="table-wrap"><table class="table click" id="rq-table">
+        <thead><tr><th>时间</th><th>模型</th><th>账号</th><th>状态</th><th>会话</th><th>首字</th><th>耗时</th><th>输入/输出/缓存</th><th>尝试</th></tr></thead><tbody></tbody></table></div>
+        <div class="more"><button class="btn ghost hidden" id="rq-more">加载更多</button></div>
+      </div>
+    </section>
+
+    <section id="page-errors" class="page hidden">
+      <header class="page-head"><h1>错误日志</h1>
+        <div class="actions">
+          <select id="er-account"><option value="">全部账号</option></select>
+          <input id="er-rule" placeholder="规则 ID" size="14">
+          <input id="er-status" placeholder="状态码" size="6">
+          <button class="btn" id="btn-er-search">查询</button>
+          <button class="btn ghost" id="btn-er-clear">清空</button>
+        </div>
+      </header>
+      <div class="panel flush"><div class="table-wrap"><table class="table click" id="er-table">
+        <thead><tr><th>时间</th><th>账号</th><th>模型</th><th>状态</th><th>分类</th><th>规则/动作</th><th>原因</th></tr></thead><tbody></tbody></table></div>
+        <div class="more"><button class="btn ghost hidden" id="er-more">加载更多</button></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<dialog id="modal"><form method="dialog" id="modal-form"><h3 id="modal-title"></h3><div id="modal-body"></div><p id="modal-error" class="error"></p><div class="modal-actions" id="modal-actions"></div></form></dialog>
+<div id="toast" class="toast hidden"></div>
+</body>
+</html>
