@@ -229,7 +229,7 @@ new-api 打开“透传请求头”后，本服务按以下顺序识别会话，
 | `maxAccountsPerRequest` | 2 | 1–5 |
 | `ignoreCatalog` | `false` | 不按各 API Key 的模型列表判断套餐权限 |
 | `walletFallback` | `true` | 窗口和套餐模型额度都用尽后，是否允许只剩钱包/充值额度的账号付费（真金白银） |
-| `lowShare` / `spentShare` | 90 / 98 | 低余量与耗尽阈值（%） |
+| `lowShare` / `spentShare` | 90 / 98 | 已用达到多少 % 开始靠后 / 视为耗尽（按已用百分比，不是剩余） |
 | `healthFilter` / `minimumHealth` | `false` / 0.2 | 24h 成功率过滤，样本少于 20 视为健康 |
 | `firstEventTimeoutSec` / `idleTimeoutSec` / `heartbeatSec` | 120 / 360 / 25 | 流式 |
 | `requestTimeoutSec` | 900 | 非流式总超时 |
