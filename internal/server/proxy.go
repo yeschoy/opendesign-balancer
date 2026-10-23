@@ -135,7 +135,8 @@ func cacheRate(in, cached *int64, anthropic bool) *float64 {
 func (r *requestLog) LogKeys() map[string]string {
 	return map[string]string{"requestId": r.RequestID, "accountId": r.AccountID, "status": strconv.Itoa(r.Status),
 		"result": r.Result, "model": r.Model, "errorCategory": r.ErrorCategory, "bindingResult": r.BindingResult,
-		"clientKeyId": r.ClientKeyID, "stream": strconv.FormatBool(r.Stream), "protocol": r.Protocol}
+		"clientKeyId": r.ClientKeyID, "stream": strconv.FormatBool(r.Stream), "protocol": r.Protocol,
+		"affinityKeyType": r.AffinityKeyType, "affinityConfidence": r.AffinityConfidence}
 }
 
 func (e errorLog) LogKeys() map[string]string {

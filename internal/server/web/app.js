@@ -922,7 +922,10 @@ async function loadLogs(kind, reset) {
   const add = (k, v) => { if (v) q.set(k, v); };
   add('accountId', $(`#${p}-account`).value);
   add('status', $(`#${p}-status`).value.trim());
-  if (kind === 'requests') { add('result', $('#rq-result').value); add('protocol', $('#rq-protocol').value); add('model', $('#rq-model').value.trim()); } else if (kind === 'details') add('requestId', $('#dt-rid').value.trim()); else add('ruleId', $('#er-rule').value.trim());
+  if (kind === 'requests') { add('result', $('#rq-result').value); add('protocol', $('#rq-protocol').value);
+    const af = $('#rq-affinity').value;
+    if (af.startsWith('c:')) add('affinityConfidence', af.slice(2)); else add('affinityKeyType', af);
+    add('model', $('#rq-model').value.trim()); } else if (kind === 'details') add('requestId', $('#dt-rid').value.trim()); else add('ruleId', $('#er-rule').value.trim());
   const d = await api('GET', `/api/logs/${kind}?${q}`);
   st.items = st.items.concat(d.items);
   st.cursor = d.nextCursor || '';

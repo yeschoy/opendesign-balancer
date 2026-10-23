@@ -123,7 +123,7 @@ type Store struct {
 
 // Filters are the query parameters each kind accepts besides limit/cursor/since/until.
 var Filters = map[string][]string{
-	"requests": {"requestId", "accountId", "status", "result", "model", "errorCategory", "bindingResult", "clientKeyId", "stream", "protocol"},
+	"requests": {"requestId", "accountId", "status", "result", "model", "errorCategory", "bindingResult", "clientKeyId", "stream", "protocol", "affinityKeyType", "affinityConfidence"},
 	"errors":   {"requestId", "accountId", "status", "category", "ruleId", "model"},
 	"details":  {"requestId", "accountId", "status", "model", "protocol"},
 }
