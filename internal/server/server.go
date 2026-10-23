@@ -140,8 +140,8 @@ func New(dataDir string, opt Options) (*Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	s.admin = newAdminAuth()
-	s.openAuth = newAdminAuth()
+	s.admin = newAdminAuth(filepath.Join(dataDir, "sessions.json"))
+	s.openAuth = newAdminAuth("")
 	s.devices = newDeviceFlows()
 	if s.staging, err = loadStaging(stagingPath(dataDir)); err != nil {
 		return nil, err

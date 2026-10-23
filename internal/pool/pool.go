@@ -130,7 +130,7 @@ func (d *decay) value(now time.Time) float64 {
 // MinHealthSamples: fewer samples than this read as unknown health.
 const MinHealthSamples = 20
 
-const maxBindings = 50000
+const maxBindings = 4096
 
 type Pool struct {
 	mu           sync.Mutex

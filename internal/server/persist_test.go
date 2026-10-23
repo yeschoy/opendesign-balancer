@@ -2,8 +2,11 @@ package server
 
 import (
 	"bytes"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -52,5 +55,26 @@ func TestMetadataSavesCountersLazilyAndStateAtOnce(t *testing.T) {
 	}
 	if bytes.Equal(read(), saved) {
 		t.Fatal("a cooldown waited for sampleSaveEvery")
+	}
+}
+
+func TestAdminSessionsSurviveRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	a := newAdminAuth(path)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/api/login", nil)
+	sess := a.create(rec, req)
+	cookie := rec.Result().Cookies()[0]
+	if raw, _ := os.ReadFile(path); strings.Contains(string(raw), cookie.Value) {
+		t.Fatal("the sessions file holds a usable token")
+	}
+	next := httptest.NewRequest(http.MethodGet, "/api/session", nil)
+	next.AddCookie(cookie)
+	if _, got := newAdminAuth(path).get(next); got == nil || got.csrf != sess.csrf {
+		t.Fatalf("session lost across restart: %+v", got)
+	}
+	a.destroyAll()
+	if _, got := newAdminAuth(path).get(next); got != nil {
+		t.Fatal("a destroyed session came back")
 	}
 }

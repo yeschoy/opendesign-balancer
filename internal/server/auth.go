@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"opendesign-balancer/internal/fsutil"
 	"strconv"
 	"strings"
 	"sync"
@@ -61,12 +62,49 @@ type adminSession struct {
 
 type adminAuth struct {
 	mu       sync.Mutex
-	sessions map[string]*adminSession
+	sessions map[string]*adminSession // by sha256 of the cookie token, so the file never holds a usable token
 	fails    map[string][]time.Time
+	path     string // sessions file; empty: sessions live in memory only
 }
 
-func newAdminAuth() *adminAuth {
-	return &adminAuth{sessions: map[string]*adminSession{}, fails: map[string][]time.Time{}}
+// newAdminAuth makes the login state; with a path, sessions survive restarts
+// (a redeploy would otherwise log everyone out).
+func newAdminAuth(path string) *adminAuth {
+	a := &adminAuth{sessions: map[string]*adminSession{}, fails: map[string][]time.Time{}, path: path}
+	if path == "" {
+		return a
+	}
+	var saved map[string]struct {
+		CSRF    string    `json:"csrf"`
+		Expires time.Time `json:"expires"`
+	}
+	if fsutil.ReadJSON(path, &saved) == nil {
+		now := time.Now()
+		for k, v := range saved {
+			if v.Expires.After(now) && v.CSRF != "" {
+				a.sessions[k] = &adminSession{csrf: v.CSRF, expires: v.Expires}
+			}
+		}
+	}
+	return a
+}
+
+func tokenKey(token string) string {
+	sum := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(sum[:])
+}
+
+// save writes the sessions file (caller holds the lock). A failed write only
+// costs a re-login after the next restart.
+func (a *adminAuth) save() {
+	if a.path == "" {
+		return
+	}
+	out := map[string]any{}
+	for k, s := range a.sessions {
+		out[k] = map[string]any{"csrf": s.csrf, "expires": s.expires}
+	}
+	_ = fsutil.WriteJSONCompactAtomic(a.path, out)
 }
 
 func randHex(n int) string {
@@ -115,7 +153,8 @@ func (a *adminAuth) create(w http.ResponseWriter, r *http.Request) *adminSession
 	}
 	token := randHex(32)
 	s := &adminSession{csrf: randHex(16), expires: now.Add(sessionTTL)}
-	a.sessions[token] = s
+	a.sessions[tokenKey(token)] = s
+	a.save()
 	http.SetCookie(w, &http.Cookie{Name: sessionCookie, Value: token, Path: "/", HttpOnly: true,
 		SameSite: http.SameSiteStrictMode, Secure: isHTTPS(r), MaxAge: int(sessionTTL.Seconds())})
 	return s
@@ -132,7 +171,7 @@ func (a *adminAuth) get(r *http.Request) (string, *adminSession) {
 	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	s := a.sessions[c.Value]
+	s := a.sessions[tokenKey(c.Value)]
 	if s == nil || time.Now().After(s.expires) {
 		return "", nil
 	}
@@ -141,7 +180,8 @@ func (a *adminAuth) get(r *http.Request) (string, *adminSession) {
 
 func (a *adminAuth) destroy(token string) {
 	a.mu.Lock()
-	delete(a.sessions, token)
+	delete(a.sessions, tokenKey(token))
+	a.save()
 	a.mu.Unlock()
 }
 
@@ -149,6 +189,7 @@ func (a *adminAuth) destroy(token string) {
 func (a *adminAuth) destroyAll() {
 	a.mu.Lock()
 	a.sessions = map[string]*adminSession{}
+	a.save()
 	a.mu.Unlock()
 }
 
