@@ -710,3 +710,19 @@ func TestDetailCaptureKeepsHeadAndTail(t *testing.T) {
 		t.Fatalf("clipMiddle = %q", b)
 	}
 }
+
+func TestStripUnsupportedTool(t *testing.T) {
+	errBody := []byte(`{"error":{"message":"[code=unsupported_tool] unsupported Responses tool type \"web_search\" at tools[1] on Chat route for model \"x\"","code":"unsupported_tool"}}`)
+	body := []byte(`{"model":"x","tools":[{"type":"function","function":{"name":"a"}},{"type":"web_search"}],"tool_choice":"auto"}`)
+	nb, ok := stripUnsupportedTool(body, errBody)
+	if !ok || strings.Contains(string(nb), "web_search") || !strings.Contains(string(nb), `"name":"a"`) || !strings.Contains(string(nb), "tool_choice") {
+		t.Fatalf("got %v %s", ok, nb)
+	}
+	nb, ok = stripUnsupportedTool([]byte(`{"model":"x","tools":[{"type":"web_search"}],"tool_choice":"auto"}`), errBody)
+	if !ok || strings.Contains(string(nb), "tools") || strings.Contains(string(nb), "tool_choice") {
+		t.Fatalf("got %v %s", ok, nb)
+	}
+	if _, ok := stripUnsupportedTool(body, []byte(`{"error":"bad"}`)); ok {
+		t.Fatal("unexpected strip")
+	}
+}

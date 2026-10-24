@@ -340,6 +340,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 
 	excluded := map[string]bool{}
 	var last *attemptResult
+	strippedTools := 0
 	for i := 0; i < cfg.Routing.MaxAccounts; i++ {
 		wait := time.Duration(cfg.Routing.ConcurrencyWaitMs) * time.Millisecond
 		if i > 0 {
@@ -440,6 +441,16 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		att.Action, att.RuleID = ev.action, ev.ruleID
 		rec.Attempts = append(rec.Attempts, att)
 		last = res
+		if res.status == http.StatusBadRequest && strippedTools < 3 {
+			// the upstream refuses a hosted tool (e.g. web_search) on this route:
+			// drop that tool type and ask the same account again
+			if nb, ok := stripUnsupportedTool(body, res.body); ok {
+				body = nb
+				strippedTools++
+				i--
+				continue
+			}
+		}
 		if !ev.switchAccount || i+1 >= cfg.Routing.MaxAccounts {
 			break
 		}
@@ -454,6 +465,49 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		rec.RetryAfter = &ra
 	}
 	finish(status, "failed")
+}
+
+var unsupportedToolRe = regexp.MustCompile(`unsupported_tool\][^"]*?unsupported \w+ tool type \\?"([A-Za-z0-9_.-]+)\\?"`)
+
+// stripUnsupportedTool removes every tool of the type an upstream
+// unsupported_tool 400 names from the request body. Clients such as Codex
+// add hosted tools (web_search) that the chat route of non-OpenAI models
+// rejects, while the rest of the request is fine.
+func stripUnsupportedTool(body, errBody []byte) ([]byte, bool) {
+	m := unsupportedToolRe.FindSubmatch(errBody)
+	if m == nil {
+		return nil, false
+	}
+	var obj map[string]json.RawMessage
+	if json.Unmarshal(body, &obj) != nil {
+		return nil, false
+	}
+	var tools []json.RawMessage
+	if json.Unmarshal(obj["tools"], &tools) != nil {
+		return nil, false
+	}
+	kept := make([]json.RawMessage, 0, len(tools))
+	for _, t := range tools {
+		var ty struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(t, &ty) == nil && ty.Type == string(m[1]) {
+			continue
+		}
+		kept = append(kept, t)
+	}
+	if len(kept) == len(tools) {
+		return nil, false
+	}
+	if len(kept) == 0 {
+		delete(obj, "tools")
+		delete(obj, "tool_choice")
+		delete(obj, "parallel_tool_calls")
+	} else {
+		obj["tools"], _ = json.Marshal(kept)
+	}
+	nb, err := json.Marshal(obj)
+	return nb, err == nil
 }
 
 // wrappedStatus finds a deterministic request error an upstream wrapped in
