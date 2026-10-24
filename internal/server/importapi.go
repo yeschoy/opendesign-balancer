@@ -7,7 +7,8 @@ package server
 // written to config.json but parked in DATA_DIR/staging.json until an admin
 // decides in the console to overwrite the existing account, add it as a new
 // one, or discard it. The note of every imported account records when and
-// through which import key it arrived.
+// through which import key it arrived, and every call lands in the import
+// log (importlog.go) with the caller IP and the counts.
 
 import (
 	"crypto/subtle"
@@ -262,8 +263,11 @@ func (s *Server) handleOpenImport(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusUnauthorized, errors.New("invalid or missing import key"))
 		return
 	}
+	rec := importRecord{Source: "open", ImportKey: importKeyName(ik), ImportKeyID: ik.ID}
 	var in importRequest
 	if err := readBody(r, &in); err != nil {
+		rec.Status, rec.Error = http.StatusBadRequest, err.Error()
+		s.recordImport(r, rec)
 		apiError(w, http.StatusBadRequest, err)
 		return
 	}
@@ -272,7 +276,10 @@ func (s *Server) handleOpenImport(w http.ResponseWriter, r *http.Request) {
 		items = []importItem{in.importItem}
 	}
 	if len(items) > maxImportBatch {
-		apiError(w, http.StatusBadRequest, fmt.Errorf("at most %d accounts per request", maxImportBatch))
+		err := fmt.Errorf("at most %d accounts per request", maxImportBatch)
+		rec.Total, rec.Failed, rec.Status, rec.Error = len(items), len(items), http.StatusBadRequest, err.Error()
+		s.recordImport(r, rec)
+		apiError(w, http.StatusBadRequest, err)
 		return
 	}
 	now := time.Now().UTC()
@@ -300,6 +307,8 @@ func (s *Server) handleOpenImport(w http.ResponseWriter, r *http.Request) {
 	case added+unchanged == 0:
 		status = http.StatusAccepted
 	}
+	rec.Total, rec.Added, rec.Staged, rec.Unchanged, rec.Failed, rec.Status = len(items), added, staged, unchanged, failed, status
+	s.recordImport(r, rec)
 	writeJSON(w, status, map[string]any{"added": added, "staged": staged, "unchanged": unchanged, "failed": failed, "results": results})
 }
 
@@ -334,10 +343,7 @@ func (s *Server) importOne(ik config.ImportKey, it importItem, now time.Time) im
 	if err := config.ValidateProxyURL(strings.TrimSpace(it.ProxyURL)); err != nil {
 		return fail(err.Error())
 	}
-	keyName := ik.Name
-	if keyName == "" {
-		keyName = ik.ID
-	}
+	keyName := importKeyName(ik)
 	for attempt := 0; ; attempt++ {
 		res, retry := s.importDecide(ik, it, now, keyName, runtimeKey, controlKey, name, group)
 		if !retry || attempt >= 3 {
@@ -389,6 +395,14 @@ func (s *Server) importDecide(ik config.ImportKey, it importItem, now time.Time,
 }
 
 var errConflictRace = errors.New("conflict appeared while writing")
+
+// importKeyName is how notes and records name an import key.
+func importKeyName(ik config.ImportKey) string {
+	if ik.Name != "" {
+		return ik.Name
+	}
+	return ik.ID
+}
 
 // ---- admin: staging area ----
 

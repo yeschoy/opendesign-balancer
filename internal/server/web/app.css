@@ -53,6 +53,7 @@ main { padding: 22px 28px 60px; min-width: 0; }
 .panel { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px 18px; margin-bottom: 16px; box-shadow: var(--shadow); }
 .panel.flush { padding: 0; overflow: hidden; }
 .panel.flush .panel-title { margin: 0; padding: 12px 14px; border-bottom: 1px solid var(--line); display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.panel-title .push { margin-left: auto; }
 .page-head.mt { margin-top: 28px; }
 pre.code { background: var(--code); padding: 12px; border-radius: 8px; overflow: auto; margin: 10px 0 0; white-space: pre-wrap; word-break: break-all; }
 .conf + .conf { margin-top: 4px; }

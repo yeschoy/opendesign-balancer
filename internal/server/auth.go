@@ -121,6 +121,29 @@ func clientIP(r *http.Request) string {
 	return host
 }
 
+// requestIP is the caller's address for the records. Behind cloudflared or a
+// proxy on this host or the docker network the TCP peer is the proxy, so for
+// a loopback or private peer CF-Connecting-IP, X-Real-IP or the last
+// X-Forwarded-For hop wins; a public peer's headers are ignored. peer is
+// the TCP peer when it differs from ip.
+func requestIP(r *http.Request) (ip, peer string) {
+	peer = clientIP(r)
+	if p := net.ParseIP(peer); p == nil || !(p.IsLoopback() || p.IsPrivate()) {
+		return peer, ""
+	}
+	cands := []string{r.Header.Get("CF-Connecting-IP"), r.Header.Get("X-Real-IP")}
+	if xff := r.Header.Values("X-Forwarded-For"); len(xff) > 0 {
+		hops := strings.Split(xff[len(xff)-1], ",")
+		cands = append(cands, hops[len(hops)-1])
+	}
+	for _, c := range cands {
+		if c = strings.TrimSpace(c); net.ParseIP(c) != nil && c != peer {
+			return c, peer
+		}
+	}
+	return peer, ""
+}
+
 // limited: 5 failed logins per IP per 60 s.
 func (a *adminAuth) limited(ip string) bool {
 	a.mu.Lock()

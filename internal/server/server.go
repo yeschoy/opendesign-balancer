@@ -57,6 +57,8 @@ type Server struct {
 	openAuth *adminAuth
 	// staging holds open-endpoint imports that collide with an account.
 	staging *staging
+	// imports logs every import call: caller IP, time, account counts.
+	imports *importLog
 	// metaDirty: quota, config or the routing secret changed (saved on the next
 	// tick). statsDirty: only the rolling counters changed (saved every
 	// sampleSaveEvery at most).
@@ -144,6 +146,9 @@ func New(dataDir string, opt Options) (*Server, error) {
 	s.openAuth = newAdminAuth("")
 	s.devices = newDeviceFlows()
 	if s.staging, err = loadStaging(stagingPath(dataDir)); err != nil {
+		return nil, err
+	}
+	if s.imports, err = loadImportLog(importLogPath(dataDir)); err != nil {
 		return nil, err
 	}
 	if opt.AdminPassword != "" && store.Get().Admin.PasswordHash == "" {

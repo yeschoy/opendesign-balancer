@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -187,5 +189,111 @@ func TestStagingSurvivesRestart(t *testing.T) {
 	}
 	if l := again.list(); len(l) != 1 || l[0].Name != "dup" || l[0].ImportKey != "signup-bot" {
 		t.Fatalf("reloaded staging: %+v", l)
+	}
+}
+
+func TestImportLogRecordsCalls(t *testing.T) {
+	e := newImportEnv(t)
+	// a failed authentication is not recorded
+	if st, _ := e.openImport("sk-odbimp-wrong", map[string]any{"runtimeKey": "sk-amr-new"}); st != 401 {
+		t.Fatalf("wrong key: %d", st)
+	}
+	b, _ := json.Marshal(map[string]any{"accounts": []map[string]any{
+		{"runtimeKey": "sk-amr-log-1", "name": "L1"},
+		{"runtimeKey": "sk-amr-a-runtime-secret"}, // the existing account again
+		{"runtimeKey": "bad"},
+	}})
+	req, _ := http.NewRequest(http.MethodPost, e.front.URL+"/open/v1/accounts/import", bytes.NewReader(b))
+	req.Header.Set("Authorization", "Bearer "+testImportKey)
+	req.Header.Set("CF-Connecting-IP", "203.0.113.7")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if st, _ := e.openImport(testImportKey, "not an object"); st != 400 {
+		t.Fatalf("bad body: %d", st)
+	}
+	recs := e.srv.imports.recent(10)
+	if len(recs) != 2 {
+		t.Fatalf("records = %d, want 2 (401 not recorded): %+v", len(recs), recs)
+	}
+	bad, batch := recs[0], recs[1]
+	if bad.Status != 400 || bad.Error == "" || bad.Total != 0 {
+		t.Fatalf("bad body record: %+v", bad)
+	}
+	if batch.Source != "open" || batch.ImportKey != "signup-bot" || batch.ImportKeyID != "ik1" || batch.Status != 200 ||
+		batch.Total != 3 || batch.Added != 1 || batch.Unchanged != 1 || batch.Failed != 1 || batch.Staged != 0 {
+		t.Fatalf("batch record: %+v", batch)
+	}
+	// the test server's peer is loopback, so the Cloudflare header names the caller
+	if batch.IP != "203.0.113.7" || batch.Peer != "127.0.0.1" || bad.IP != "127.0.0.1" || bad.Peer != "" {
+		t.Fatalf("ips: batch %s/%s bad %s/%s", batch.IP, batch.Peer, bad.IP, bad.Peer)
+	}
+	reloaded, err := loadImportLog(importLogPath(e.srv.dataDir))
+	if err != nil || len(reloaded.recent(10)) != 2 || reloaded.recent(1)[0].ID != bad.ID {
+		t.Fatalf("reload: %v %+v", err, reloaded)
+	}
+}
+
+func TestImportLogCap(t *testing.T) {
+	l := &importLog{path: t.TempDir() + "/import-log.json"}
+	for i := 0; i < maxImportLog+5; i++ {
+		l.add(importRecord{ID: strconv.Itoa(i)})
+	}
+	if got := l.recent(maxImportLog * 2); len(got) != maxImportLog || got[0].ID != strconv.Itoa(maxImportLog+4) || got[len(got)-1].ID != "5" {
+		t.Fatalf("cap: len %d first %s last %s", len(got), got[0].ID, got[len(got)-1].ID)
+	}
+}
+
+func TestRequestIP(t *testing.T) {
+	cases := []struct {
+		peer    string
+		hdr     map[string]string
+		ip, via string
+	}{
+		{"198.51.100.1:5000", map[string]string{"CF-Connecting-IP": "203.0.113.7"}, "198.51.100.1", ""}, // public peer: headers ignored
+		{"172.18.0.1:5000", map[string]string{"CF-Connecting-IP": "203.0.113.7", "X-Real-IP": "10.0.0.9"}, "203.0.113.7", "172.18.0.1"},
+		{"127.0.0.1:5000", map[string]string{"X-Forwarded-For": "1.1.1.1, 203.0.113.8"}, "203.0.113.8", "127.0.0.1"}, // last hop, not the spoofable first
+		{"127.0.0.1:5000", map[string]string{"CF-Connecting-IP": "not-an-ip"}, "127.0.0.1", ""},
+		{"10.1.2.3:5000", nil, "10.1.2.3", ""},
+	}
+	for i, c := range cases {
+		r, _ := http.NewRequest(http.MethodGet, "http://x/", nil)
+		r.RemoteAddr = c.peer
+		for k, v := range c.hdr {
+			r.Header.Set(k, v)
+		}
+		if ip, peer := requestIP(r); ip != c.ip || peer != c.via {
+			t.Errorf("case %d: got %s/%s want %s/%s", i, ip, peer, c.ip, c.via)
+		}
+	}
+}
+
+func TestImportLogRecordsConsoleImport(t *testing.T) {
+	e := newImportEnv(t)
+	post := func(text string) int {
+		b, _ := json.Marshal(map[string]string{"text": text, "group": "g2"})
+		req := httptest.NewRequest(http.MethodPost, "/api/accounts/import", bytes.NewReader(b))
+		req.RemoteAddr = "192.0.2.5:4000"
+		rec := httptest.NewRecorder()
+		e.srv.apiImportAccounts(rec, req)
+		return rec.Code
+	}
+	if st := post("sk-amr-c1,vela_ctrl_c1,C1\nsk-amr-c2"); st != 200 {
+		t.Fatalf("import: %d", st)
+	}
+	if st := post("sk-amr-c3\nno-key-here"); st != 400 {
+		t.Fatalf("bad line: %d", st)
+	}
+	recs := e.srv.imports.recent(10)
+	if len(recs) != 2 {
+		t.Fatalf("records = %d", len(recs))
+	}
+	if r := recs[1]; r.Source != "console" || r.Group != "g2" || r.IP != "192.0.2.5" || r.Total != 2 || r.Added != 2 || r.Status != 200 {
+		t.Fatalf("ok record: %+v", r)
+	}
+	if r := recs[0]; r.Total != 2 || r.Added != 0 || r.Failed != 1 || r.Status != 400 || r.Error == "" {
+		t.Fatalf("rejected record: %+v", r)
 	}
 }

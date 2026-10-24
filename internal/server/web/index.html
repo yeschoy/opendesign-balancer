@@ -84,6 +84,12 @@
         <thead><tr><th>名称</th><th>默认分组</th><th>密钥</th><th>状态</th><th>创建时间</th><th></th></tr></thead><tbody></tbody></table></div>
         <p id="ik-empty" class="empty hidden">还没有导入密钥。自动上号脚本需要一把 <code>sk-odbimp-…</code> 才能调用开放导入接口。</p>
       </div>
+      <div class="panel flush" id="ilog-panel">
+        <h2 class="panel-title">导入记录 <span class="muted small">开放接口（鉴权通过后）与「账号」页批量导入的每次调用，保留最近 1000 条</span><button class="btn small push" id="btn-refresh-ilog">刷新</button></h2>
+        <div class="table-wrap"><table class="table" id="ilog-table">
+          <thead><tr><th>时间</th><th>来源</th><th>IP</th><th>提交</th><th>新增</th><th>暂存</th><th>未变</th><th>失败</th><th>结果</th></tr></thead><tbody></tbody></table></div>
+        <p id="ilog-empty" class="empty hidden">还没有导入记录。</p>
+      </div>
       <div class="panel">
         <h2>开放导入接口（自动上号）</h2>
         <ol class="howto">

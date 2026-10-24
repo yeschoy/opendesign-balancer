@@ -585,7 +585,22 @@ async function loadImportKeys() {
       loadImportKeys();
     } catch (e) { toast(e.message); }
   }));
+  await loadImportLog();
 }
+async function loadImportLog() {
+  const d = await api('GET', '/api/import-log');
+  const items = d.items || [];
+  const n = (v) => v ? num(v) : '<span class="muted">0</span>';
+  $('#ilog-table tbody').innerHTML = items.map((it) => `<tr>
+    <td class="num">${esc(fmtTime(it.at))}</td>
+    <td>${it.source === 'console' ? '管理台批量导入' : '开放接口'}${it.importKey ? '<div class="acc-sub">密钥 ' + esc(it.importKey) + '</div>' : ''}${it.group ? '<div class="acc-sub">分组 ' + esc(it.group) + '</div>' : ''}</td>
+    <td><code>${esc(it.ip)}</code>${it.peer ? '<div class="acc-sub" title="TCP 对端（代理）">经 ' + esc(it.peer) + '</div>' : ''}</td>
+    <td class="num">${n(it.total)}</td><td class="num">${n(it.added)}</td><td class="num">${n(it.staged)}</td><td class="num">${n(it.unchanged)}</td><td class="num">${n(it.failed)}</td>
+    <td><span class="badge ${it.status === 200 ? 'ok' : it.status < 300 ? 'warn' : 'bad'}">${esc(it.status)}</span>${it.error ? '<div class="acc-sub">' + esc(it.error) + '</div>' : ''}</td>
+  </tr>`).join('');
+  $('#ilog-empty').classList.toggle('hidden', items.length > 0);
+}
+$('#btn-refresh-ilog').addEventListener('click', () => loadImportLog().catch((e) => toast(e.message)));
 $('#btn-new-import-key').addEventListener('click', async () => {
   let created = null;
   await modal({ title: '新建导入密钥',

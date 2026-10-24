@@ -92,6 +92,7 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	a("GET /api/staging", s.apiStaging)
 	a("POST /api/staging/{id}/apply", s.apiStagingApply)
 	a("DELETE /api/staging/{id}", s.apiStagingDiscard)
+	a("GET /api/import-log", s.apiImportLog)
 	a("GET /api/settings", s.apiSettings)
 	a("PUT /api/settings", s.apiSaveSettings)
 	a("GET /api/logs/{kind}", s.apiLogs)
@@ -436,6 +437,7 @@ func (s *Server) apiImportAccounts(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, err)
 		return
 	}
+	rec := importRecord{Source: "console", Group: strings.TrimSpace(in.Group)}
 	var added []config.Account
 	var errs []string
 	for n, line := range strings.Split(in.Text, "\n") {
@@ -463,7 +465,11 @@ func (s *Server) apiImportAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		added = append(added, a)
 	}
+	// all or nothing: one bad line rejects the batch
+	rec.Total, rec.Status = len(added)+len(errs), http.StatusBadRequest
 	if len(errs) > 0 {
+		rec.Failed, rec.Error = len(errs), clipRunes(strings.Join(errs, "；"), 300)
+		s.recordImport(r, rec)
 		apiError(w, http.StatusBadRequest, errors.New(strings.Join(errs, "；")))
 		return
 	}
@@ -476,9 +482,13 @@ func (s *Server) apiImportAccounts(w http.ResponseWriter, r *http.Request) {
 		return nil
 	})
 	if err != nil {
+		rec.Failed, rec.Error = len(added), err.Error()
+		s.recordImport(r, rec)
 		s.configError(w, err)
 		return
 	}
+	rec.Added, rec.Status = len(added), http.StatusOK
+	s.recordImport(r, rec)
 	writeJSON(w, http.StatusOK, map[string]any{"revision": cfg.Revision, "added": len(added)})
 }
 
