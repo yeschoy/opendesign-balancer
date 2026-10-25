@@ -36,6 +36,8 @@ type detailLog struct {
 	Method                string              `json:"method"`
 	Path                  string              `json:"path"`
 	Model                 string              `json:"model"`
+	ClientKeyID           string              `json:"clientKeyId,omitempty"`
+	ClientKeyName         string              `json:"clientKeyName,omitempty"`
 	AccountID             string              `json:"accountId,omitempty"`
 	Status                int                 `json:"status"`
 	RequestHeaders        map[string][]string `json:"requestHeaders"`
@@ -49,7 +51,7 @@ type detailLog struct {
 }
 
 func (d *detailLog) LogKeys() map[string]string {
-	return map[string]string{"requestId": d.RequestID, "accountId": d.AccountID, "status": strconv.Itoa(d.Status),
+	return map[string]string{"requestId": d.RequestID, "accountId": d.AccountID, "clientKeyId": d.ClientKeyID, "status": strconv.Itoa(d.Status),
 		"model": d.Model, "protocol": d.Protocol}
 }
 

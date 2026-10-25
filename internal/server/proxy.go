@@ -53,6 +53,7 @@ type requestLog struct {
 	TS                 time.Time          `json:"ts"`
 	RequestID          string             `json:"requestId"`
 	ClientKeyID        string             `json:"clientKeyId,omitempty"`
+	ClientKeyName      string             `json:"clientKeyName,omitempty"`
 	Group              string             `json:"group,omitempty"`
 	Path               string             `json:"path"`
 	InboundProtocol    string             `json:"inboundProtocol"`
@@ -93,6 +94,8 @@ type errorLog struct {
 	TS                  time.Time `json:"ts"`
 	RequestID           string    `json:"requestId"`
 	AttemptIndex        int       `json:"attemptIndex"`
+	ClientKeyID         string    `json:"clientKeyId,omitempty"`
+	ClientKeyName       string    `json:"clientKeyName,omitempty"`
 	AccountID           string    `json:"accountId"`
 	AccountName         string    `json:"accountName"`
 	Model               string    `json:"model"`
@@ -143,7 +146,7 @@ func (r *requestLog) LogKeys() map[string]string {
 
 func (e errorLog) LogKeys() map[string]string {
 	return map[string]string{"requestId": e.RequestID, "accountId": e.AccountID, "status": strconv.Itoa(e.Status),
-		"category": e.Category, "ruleId": e.RuleID, "model": e.Model}
+		"category": e.Category, "ruleId": e.RuleID, "model": e.Model, "clientKeyId": e.ClientKeyID}
 }
 
 // ---- attempt results ----
@@ -284,7 +287,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if cw != nil {
 			max := cw.max
 			d := &detailLog{TS: rec.TS, RequestID: rid, Protocol: rec.Protocol, Method: r.Method, Path: r.URL.Path, Model: rec.Model,
-				AccountID: rec.AccountID, Status: status, RequestHeaders: maskHeaders(cfg, reqHeader), RequestBodyBytes: len(reqBody),
+				ClientKeyID: rec.ClientKeyID, ClientKeyName: rec.ClientKeyName, AccountID: rec.AccountID, Status: status, RequestHeaders: maskHeaders(cfg, reqHeader), RequestBodyBytes: len(reqBody),
 				ResponseHeaders: maskHeaders(cfg, cw.Header()), ResponseBodyBytes: cw.n}
 			d.RequestBody, d.RequestBodyTruncated = maskBody(cfg, reqBody, max)
 			respBody, cut := cw.body()
@@ -311,7 +314,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		finish(http.StatusUnauthorized, "failed")
 		return
 	}
-	rec.ClientKeyID, rec.Group = ck.ID, ck.Group
+	rec.ClientKeyID, rec.ClientKeyName, rec.Group = ck.ID, ck.Name, ck.Group
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(cfg.Routing.MaxBodyMB)<<20))
 	if err != nil {
 		var mbe *http.MaxBytesError
@@ -437,7 +440,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 			finish(499, "client_cancelled")
 			return
 		}
-		ev := s.evaluate(cfg, acct, rec.Model, res, rid, i)
+		ev := s.evaluate(cfg, acct, rec.Model, res, rid, i, rec.ClientKeyID, rec.ClientKeyName)
 		att.Action, att.RuleID = ev.action, ev.ruleID
 		rec.Attempts = append(rec.Attempts, att)
 		last = res
@@ -534,12 +537,12 @@ type evaluation struct {
 
 // evaluate applies the error rules to a failed attempt that wrote nothing
 // to the client, logs it, and says whether to switch accounts.
-func (s *Server) evaluate(cfg *config.Config, acct config.Account, model string, res *attemptResult, rid string, idx int) evaluation {
+func (s *Server) evaluate(cfg *config.Config, acct config.Account, model string, res *attemptResult, rid string, idx int, keyID, keyName string) evaluation {
 	now := time.Now()
 	reason, truncated := errorReason(cfg, res.body, res.contentType)
 	redacted := redactSecrets(cfg, clip(string(res.body), 16<<10))
 	matchText := strings.ToLower(redacted)
-	el := errorLog{TS: now.UTC(), RequestID: rid, AttemptIndex: idx, AccountID: acct.ID, AccountName: acct.Name, Model: model,
+	el := errorLog{TS: now.UTC(), RequestID: rid, AttemptIndex: idx, ClientKeyID: keyID, ClientKeyName: keyName, AccountID: acct.ID, AccountName: acct.Name, Model: model,
 		Status: res.status, Category: res.category, Terminal: res.terminal, Reason: reason, ReasonTruncated: truncated,
 		MatchedBy: "default", HealthAction: "degrade", ResponseContentType: strings.SplitN(res.contentType, ";", 2)[0], ResponseBytes: len(res.body)}
 	if res.upstreamStatus != 0 {

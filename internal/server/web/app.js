@@ -903,9 +903,11 @@ function costSum(b) { return [b.cc ? money(b.cc, 'CNY') : '', b.cu ? money(b.cu,
 // cached share of the prompt (b.p, backfilled from input for old buckets on load)
 function hitRate(b) { return b.p ? Math.min(b.k / b.p, 1) : null; }
 function costCell(r) { return r.cost === undefined || r.cost === null ? '—' : esc(money(r.cost, r.currency)); }
+function keyCell(r) { return esc(r.clientKeyName || r.clientKeyId || '—'); }
 function requestRow(r) {
   const tok = [r.inputTokens, r.outputTokens, r.cachedTokens].map((v) => v === null || v === undefined ? '—' : num(v)).join(' / ');
   return `<tr data-rid="${esc(r.requestId)}"><td class="num">${esc(fmtTime(r.ts))}</td><td><span class="acc-sub">${esc(r.protocol || r.inboundProtocol || '—')}</span></td><td>${esc(r.model)}${r.stream ? ' <span class="badge">流</span>' : ''}</td>
+    <td>${keyCell(r)}</td>
     <td>${esc(r.accountName || '—')}${r.switched ? ' <span class="badge warn">换号</span>' : ''}${r.overflow ? ' <span class="badge warn">溢出</span>' : ''}</td>
     <td>${statusBadge(r.status, r.result)}${r.upstreamStatus && r.upstreamStatus !== r.status ? `<div class="acc-sub">上游 ${esc(r.upstreamStatus)}</div>` : ''}${r.errorCategory ? `<div class="acc-sub">${esc(r.errorCategory)}${r.blockedBy ? '/' + esc(r.blockedBy) : ''}</div>` : ''}</td>
     <td><span class="acc-sub">${esc(BIND[r.bindingResult] || r.bindingResult)}</span><div class="acc-sub">${esc(r.affinityKeyType)}</div></td>
@@ -914,18 +916,18 @@ function requestRow(r) {
 }
 function detailRow(d) {
   const sz = (n, cut) => num(n) + ' B' + (cut ? ' <span class="badge warn">截断</span>' : '');
-  return `<tr><td class="num">${esc(fmtTime(d.ts))}</td><td><span class="acc-sub">${esc(d.protocol)}</span></td><td>${esc(d.model)}</td><td>${statusBadge(d.status)}</td>
+  return `<tr><td class="num">${esc(fmtTime(d.ts))}</td><td><span class="acc-sub">${esc(d.protocol)}</span></td><td>${esc(d.model)}</td><td>${keyCell(d)}</td><td>${statusBadge(d.status)}</td>
     <td class="num">${sz(d.requestBodyBytes, d.requestBodyTruncated)}</td><td class="num">${sz(d.responseBodyBytes, d.responseBodyTruncated)}</td><td class="small">${esc(d.requestId)}</td></tr>`;
 }
 function showDetail(d) {
   const pretty = (t) => { try { return JSON.stringify(JSON.parse(t), null, 2); } catch { return t; } };
   const sec = (title, text) => `<h4>${esc(title)}</h4><pre>${esc(text)}</pre>`;
-  modal({ title: `${d.method} ${d.path} → ${d.status}`, wide: true, body:
+  modal({ title: `${d.method} ${d.path} → ${d.status}${d.clientKeyName || d.clientKeyId ? '（密钥 ' + (d.clientKeyName || d.clientKeyId) + '）' : ''}`, wide: true, body:
     sec('请求头', JSON.stringify(d.requestHeaders, null, 2)) + sec('请求体' + (d.requestBodyTruncated ? '（已截断）' : ''), pretty(d.requestBody)) +
     sec('响应头', JSON.stringify(d.responseHeaders, null, 2)) + sec('响应体' + (d.responseBodyTruncated ? '（已截断）' : ''), pretty(d.responseBody)) });
 }
 function errorRow(e) {
-  return `<tr><td class="num">${esc(fmtTime(e.ts))}</td><td>${esc(e.accountName)}</td><td>${esc(e.model)}</td>
+  return `<tr><td class="num">${esc(fmtTime(e.ts))}</td><td>${keyCell(e)}</td><td>${esc(e.accountName)}</td><td>${esc(e.model)}</td>
     <td>${statusBadge(e.status)}${e.upstreamStatus && e.upstreamStatus !== e.status ? `<div class="acc-sub">上游 ${esc(e.upstreamStatus)}</div>` : ''}</td>
     <td>${esc(e.category)}<div class="acc-sub">${esc(e.terminal)}</div></td>
     <td>${e.ruleId ? `${esc(e.ruleId)}<div class="acc-sub">${esc(e.ruleAction)}${e.switched ? ' · 换号' : ''}</div>` : `<span class="muted">${esc(e.matchedBy)}</span>`}${e.retryRuleId ? `<div class="acc-sub">停止重试：${esc(e.retryRuleId)}</div>` : ''}</td>
