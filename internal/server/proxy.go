@@ -86,6 +86,7 @@ type requestLog struct {
 	CacheRate          *float64           `json:"cacheRate"`      // cached share of the prompt, 0..1
 	Cost               *float64           `json:"cost,omitempty"` // in Currency, from the price table
 	Currency           string             `json:"currency,omitempty"`
+	UpstreamRequestID  string             `json:"upstreamRequestId,omitempty"` // x-request-id of the upstream response that was delivered
 	Attempts           []attemptLog       `json:"attempts"`
 	Workflow           []workflowDecision `json:"workflow,omitempty"`
 }
@@ -183,6 +184,13 @@ type attemptResult struct {
 	ttft             *int64
 	usage            usage
 	ms               int64
+}
+
+// setUpstreamRequestID exposes the upstream's own request id so downstream gateways can quote it to the provider.
+func setUpstreamRequestID(dst, upstream http.Header) {
+	if id := upstream.Get("X-Request-Id"); id != "" {
+		dst.Set("X-Upstream-Request-Id", id)
+	}
 }
 
 func newRequestID() string {
@@ -417,6 +425,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		}
 		switch res.kind {
 		case outDelivered:
+			rec.UpstreamRequestID = res.header.Get("X-Request-Id")
 			rec.Attempts = append(rec.Attempts, att)
 			if res.result == "success" {
 				s.pool.Sample(acct.ID, true)
@@ -862,6 +871,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, cfg *config.Con
 	h := w.Header()
 	h.Set("Content-Type", ct)
 	h.Set("X-Attempts", strconv.Itoa(attemptNo))
+	setUpstreamRequestID(h, resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	_, _ = w.Write(b)
 	res.kind, res.result, res.status, res.terminal = outDelivered, "success", resp.StatusCode, "success"
@@ -1135,6 +1145,7 @@ func (s *Server) relayStream(w http.ResponseWriter, r *http.Request, cfg *config
 	h.Set("Cache-Control", "no-cache")
 	h.Set("X-Accel-Buffering", "no")
 	h.Set("X-Attempts", strconv.Itoa(attemptNo))
+	setUpstreamRequestID(h, resp.Header)
 	w.WriteHeader(http.StatusOK)
 	rc := http.NewResponseController(w)
 	ttft := time.Since(start).Milliseconds()
