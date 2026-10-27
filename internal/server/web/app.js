@@ -407,6 +407,7 @@ function accountForm(a) {
     <label>运行密钥</label><input id="f-rt" placeholder="${a ? esc(a.runtimeKey) + '（留空不变）' : 'sk-amr-…'}" autocomplete="off">
     <label>控制密钥</label><input id="f-ctrl" placeholder="${a && a.hasControlKey ? esc(a.controlKey) + '（留空不变）' : 'vela_ctrl_…（可选，用于读额度）'}" autocomplete="off">
     ${a && a.hasControlKey ? '<span></span><label class="check"><input type="checkbox" id="f-clear-ctrl">移除控制密钥</label>' : ''}
+    ${a ? `<span></span><span class="keycopy"><button type="button" class="btn small" data-copy="runtimeKey">复制运行密钥</button>${a.hasControlKey ? '<button type="button" class="btn small" data-copy="controlKey">复制控制密钥</button>' : ''}</span>` : ''}
     <label>最大并发</label><input id="f-conc" type="number" min="0" value="${v('maxConcurrent', 0)}">
     <span class="hint">0 表示不限</span>
     <label>每分钟请求</label><input id="f-rpm" type="number" min="0" value="${v('maxRpm', 0)}">
@@ -430,10 +431,18 @@ function readAccountForm() {
   if ($('#f-clear-proxy') && $('#f-clear-proxy').checked) out.clearProxy = true;
   return out;
 }
+let editingAccountId = null;
+document.addEventListener('click', async (e) => {
+  const b = e.target.closest('[data-copy]');
+  if (!b || !editingAccountId) return;
+  try { copyText((await api('GET', `/api/accounts/${editingAccountId}/keys`))[b.dataset.copy]); } catch (err) { toast(err.message); }
+});
 async function editAccount(a) {
+  editingAccountId = a.id;
   await modal({ title: '编辑账号', body: accountForm(a), buttons: [{ label: '取消', value: 'c' }, { label: '保存', value: 'ok', primary: true, action: async () => {
     await api('PUT', `/api/accounts/${a.id}`, readAccountForm()); toast('已保存');
   } }] });
+  editingAccountId = null;
   loadAccounts().catch(() => {});
 }
 $('#btn-add-manual').addEventListener('click', async () => {

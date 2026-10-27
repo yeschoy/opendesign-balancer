@@ -78,6 +78,7 @@ func (s *Server) registerAdmin(mux *http.ServeMux) {
 	a("POST /api/accounts/{id}/reset-health", s.apiAccountAction)
 	a("POST /api/accounts/{id}/refresh-quota", s.apiAccountAction)
 	a("POST /api/accounts/{id}/test", s.apiTestAccount)
+	a("GET /api/accounts/{id}/keys", s.apiAccountKeys)
 	a("POST /api/device-auth", s.apiDeviceStart)
 	a("GET /api/device-auth/{flow}", s.apiDevicePoll)
 	a("DELETE /api/device-auth/{flow}", s.apiDeviceCancel)
@@ -520,6 +521,16 @@ func (s *Server) apiAccountAction(w http.ResponseWriter, r *http.Request) {
 // apiTestAccount checks the runtime key with the free /models listing and
 // the control key with the workspace read. With inference set it also
 // sends one tiny real request, which costs credits.
+// apiAccountKeys returns the unmasked keys so the admin can copy them from the edit dialog.
+func (s *Server) apiAccountKeys(w http.ResponseWriter, r *http.Request) {
+	a, ok := s.cfg.Get().Account(r.PathValue("id"))
+	if !ok {
+		apiError(w, http.StatusNotFound, errors.New("account not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"runtimeKey": a.RuntimeKey, "controlKey": a.ControlKey})
+}
+
 func (s *Server) apiTestAccount(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	cfg := s.cfg.Get()
