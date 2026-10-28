@@ -234,6 +234,7 @@ func (s *Server) apiPassword(w http.ResponseWriter, r *http.Request) {
 
 type accountView struct {
 	ID            string          `json:"id"`
+	Provider      string          `json:"provider"`
 	Name          string          `json:"name"`
 	Email         string          `json:"email"`
 	UserID        string          `json:"userId"`
@@ -276,7 +277,7 @@ func (s *Server) accountViews(cfg *config.Config) []accountView {
 	}
 	out := make([]accountView, 0, len(cfg.Accounts))
 	for _, a := range cfg.Accounts {
-		v := accountView{ID: a.ID, Name: a.Name, Email: a.Email, UserID: a.UserID, Note: a.Note, Group: a.Group, Enabled: a.Enabled,
+		v := accountView{ID: a.ID, Provider: a.Provider, Name: a.Name, Email: a.Email, UserID: a.UserID, Note: a.Note, Group: a.Group, Enabled: a.Enabled,
 			RuntimeKey: config.Mask(a.RuntimeKey), ControlKey: config.Mask(a.ControlKey), HasControlKey: a.ControlKey != "",
 			MaxConcurrent: a.MaxConc, MaxRPM: a.MaxRPM, Weight: a.Weight, Priority: a.Priority,
 			HasProxy: a.ProxyURL != "", ProxyURL: maskProxy(a.ProxyURL), CreatedAt: a.CreatedAt, Runtime: views[a.ID], Usage24h: usage[a.ID]}
@@ -373,8 +374,11 @@ func (s *Server) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, errors.New("runtimeKey is required"))
 		return
 	}
-	a := config.Account{ID: config.NewID("acc_"), Enabled: true, Group: config.DefaultGroup}
+	a := config.Account{ID: config.NewID("acc_"), Enabled: true}
 	in.apply(&a)
+	if a.Group == "" {
+		a.Group = config.DefaultGroupFor(a.RuntimeKey)
+	}
 	cfg, err := s.cfg.Update(rev(in.ExpectedRevision), func(c *config.Config) error {
 		c.Accounts = append(c.Accounts, a)
 		return nil
@@ -450,7 +454,7 @@ func (s *Server) apiImportAccounts(w http.ResponseWriter, r *http.Request) {
 		a := config.Account{ID: config.NewID("acc_"), Enabled: true, Group: strings.TrimSpace(in.Group)}
 		for _, field := range f {
 			switch {
-			case strings.HasPrefix(field, "sk-") && a.RuntimeKey == "":
+			case config.ValidRuntimeKey(field) && a.RuntimeKey == "":
 				a.RuntimeKey = field
 			case strings.HasPrefix(field, "vela_ctrl_") && a.ControlKey == "":
 				a.ControlKey = field
@@ -461,7 +465,7 @@ func (s *Server) apiImportAccounts(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if a.RuntimeKey == "" {
-			errs = append(errs, "第 "+strconv.Itoa(n+1)+" 行缺少 sk-amr- 运行密钥")
+			errs = append(errs, "第 "+strconv.Itoa(n+1)+" 行缺少 sk-amr- / rv_ 运行密钥")
 			continue
 		}
 		added = append(added, a)
@@ -550,7 +554,7 @@ func (s *Server) apiTestAccount(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{}
 
 	t0 := time.Now()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cfg.Upstream.RuntimeBase+"/models", nil)
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cfg.RuntimeBase(a)+"/models", nil)
 	req.Header.Set("Authorization", "Bearer "+a.RuntimeKey)
 	if resp, err := client.Do(req); err != nil {
 		out["runtime"] = map[string]any{"ok": false, "error": redactSecrets(cfg, err.Error())}
@@ -576,10 +580,13 @@ func (s *Server) apiTestAccount(w http.ResponseWriter, r *http.Request) {
 		model := in.Model
 		if model == "" {
 			model = "deepseek-v4.1-flash"
+			if a.Provider == config.ProviderRiver {
+				model = "deepseek-ai/DeepSeek-V4.1-Flash"
+			}
 		}
 		payload, _ := json.Marshal(map[string]any{"model": model, "max_tokens": 1, "messages": []map[string]string{{"role": "user", "content": "ping"}}})
 		t1 := time.Now()
-		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.Upstream.RuntimeBase+"/chat/completions", bytes.NewReader(payload))
+		req, _ := http.NewRequestWithContext(ctx, http.MethodPost, cfg.RuntimeBase(a)+"/chat/completions", bytes.NewReader(payload))
 		req.Header.Set("Authorization", "Bearer "+a.RuntimeKey)
 		req.Header.Set("Content-Type", "application/json")
 		if resp, err := client.Do(req); err != nil {

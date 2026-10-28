@@ -787,7 +787,7 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, cfg *config.Con
 			markSent()
 		}
 	}}
-	target := cfg.Upstream.RuntimeBase + strings.TrimPrefix(r.URL.Path, "/v1")
+	target := cfg.RuntimeBase(acct) + strings.TrimPrefix(r.URL.Path, "/v1")
 	if r.URL.RawQuery != "" {
 		target += "?" + r.URL.RawQuery
 	}
@@ -1376,7 +1376,7 @@ func (s *Server) fetchModels(ctx context.Context, cfg *config.Config, group stri
 			continue
 		}
 		c, cancel := context.WithTimeout(ctx, 30*time.Second)
-		req, _ := http.NewRequestWithContext(c, http.MethodGet, cfg.Upstream.RuntimeBase+"/models", nil)
+		req, _ := http.NewRequestWithContext(c, http.MethodGet, cfg.RuntimeBase(a)+"/models", nil)
 		req.Header.Set("Authorization", "Bearer "+a.RuntimeKey)
 		req.Header.Set("Accept", "application/json")
 		resp, err := s.httpClient(a.ProxyURL).Do(req)

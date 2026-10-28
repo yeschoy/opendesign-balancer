@@ -326,13 +326,18 @@ func (s *Server) importOne(ik config.ImportKey, it importItem, now time.Time) im
 	group := strings.TrimSpace(it.Group)
 	if group == "" {
 		group = ik.Group
+		if group == config.DefaultGroup {
+			group = config.DefaultGroupFor(runtimeKey) // River keys go to their own pool
+		}
 	}
 	fail := func(msg string) importResult { return importResult{Status: "error", Name: name, Error: msg} }
 	switch {
 	case runtimeKey == "":
 		return fail("runtimeKey is required")
-	case !strings.HasPrefix(runtimeKey, "sk-") || len(runtimeKey) > 512:
-		return fail("runtimeKey must start with sk-amr-")
+	case !config.ValidRuntimeKey(runtimeKey) || len(runtimeKey) > 512:
+		return fail("runtimeKey must start with sk-amr- or rv_")
+	case controlKey != "" && config.ProviderForKey(runtimeKey) == config.ProviderRiver:
+		return fail("river accounts have no controlKey")
 	case controlKey != "" && (!strings.HasPrefix(controlKey, "vela_ctrl_") || len(controlKey) > 512):
 		return fail("controlKey must start with vela_ctrl_")
 	case len([]rune(name)) > 50:

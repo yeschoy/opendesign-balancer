@@ -523,7 +523,7 @@ func (p *Poller) fetch(ctx context.Context, cfg *config.Config, a config.Account
 	}
 
 	if a.RuntimeKey != "" && now.Sub(s.CatalogAt) >= catalogTTL {
-		if cat, err := FetchCatalog(ctx, p.HTTPFor(a.ProxyURL), cfg.Upstream.RuntimeBase, a.RuntimeKey); err == nil {
+		if cat, err := FetchCatalog(ctx, p.HTTPFor(a.ProxyURL), cfg.RuntimeBase(a), a.RuntimeKey); err == nil {
 			s.Catalog, s.CatalogAt, s.CatalogError = cat, now, ""
 		} else {
 			s.CatalogError = err.Error() // the last good catalogue stays

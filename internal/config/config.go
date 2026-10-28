@@ -24,7 +24,19 @@ import (
 	"opendesign-balancer/internal/rules"
 )
 
-const DefaultGroup = "default"
+const (
+	DefaultGroup = "default"
+	// RiverGroup is where River accounts land when no group is named.
+	RiverGroup = "river"
+)
+
+// DefaultGroupFor is the group an account of key's provider joins by default.
+func DefaultGroupFor(key string) string {
+	if ProviderForKey(key) == ProviderRiver {
+		return RiverGroup
+	}
+	return DefaultGroup
+}
 
 var (
 	idRe     = regexp.MustCompile(`^[A-Za-z0-9_-]{1,100}$`)
@@ -35,6 +47,36 @@ var (
 type Upstream struct {
 	RuntimeBase string `json:"runtimeBase"`
 	ControlBase string `json:"controlBase"`
+	// RiverBase is the OpenAI-compatible endpoint of River (docs.river.ai)
+	// that accounts with Provider "river" are sent to.
+	RiverBase string `json:"riverBase"`
+}
+
+const (
+	ProviderOpenDesign = "opendesign"
+	ProviderRiver      = "river"
+	RiverKeyPrefix     = "rv_"
+)
+
+// ProviderForKey infers the provider from a runtime key's prefix.
+func ProviderForKey(key string) string {
+	if strings.HasPrefix(key, RiverKeyPrefix) {
+		return ProviderRiver
+	}
+	return ProviderOpenDesign
+}
+
+// ValidRuntimeKey reports whether key looks like a runtime key of some provider.
+func ValidRuntimeKey(key string) bool {
+	return strings.HasPrefix(key, "sk-") || strings.HasPrefix(key, RiverKeyPrefix)
+}
+
+// RuntimeBase is the inference endpoint account a is served from.
+func (c *Config) RuntimeBase(a Account) string {
+	if a.Provider == ProviderRiver {
+		return c.Upstream.RiverBase
+	}
+	return c.Upstream.RuntimeBase
 }
 
 type Admin struct {
@@ -68,6 +110,7 @@ type ImportKey struct {
 
 type Account struct {
 	ID          string    `json:"id"`
+	Provider    string    `json:"provider,omitempty"` // opendesign (default) | river
 	Name        string    `json:"name"`
 	Email       string    `json:"email,omitempty"`
 	UserID      string    `json:"userId,omitempty"`
@@ -161,6 +204,7 @@ func Default() *Config {
 		Upstream: Upstream{
 			RuntimeBase: "https://amr-link.open-design.ai/v1",
 			ControlBase: "https://amr-api.open-design.ai",
+			RiverBase:   "https://api.river.ai/v1",
 		},
 		ClientKeys: []ClientKey{},
 		ImportKeys: []ImportKey{},
@@ -244,9 +288,13 @@ func (c *Config) Normalize() error {
 	if c.Upstream.ControlBase == "" {
 		c.Upstream.ControlBase = d.Upstream.ControlBase
 	}
+	if c.Upstream.RiverBase == "" {
+		c.Upstream.RiverBase = d.Upstream.RiverBase
+	}
+	c.Upstream.RiverBase = strings.TrimRight(c.Upstream.RiverBase, "/")
 	c.Upstream.RuntimeBase = strings.TrimRight(c.Upstream.RuntimeBase, "/")
 	c.Upstream.ControlBase = strings.TrimRight(c.Upstream.ControlBase, "/")
-	for _, u := range []string{c.Upstream.RuntimeBase, c.Upstream.ControlBase} {
+	for _, u := range []string{c.Upstream.RuntimeBase, c.Upstream.ControlBase, c.Upstream.RiverBase} {
 		if p, err := url.Parse(u); err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Host == "" {
 			return fmt.Errorf("invalid upstream URL %q", u)
 		}
@@ -318,6 +366,7 @@ func (c *Config) Normalize() error {
 	}
 
 	accIDs, runtimeKeys := map[string]bool{}, map[string]bool{}
+	groupProvider := map[string]string{}
 	kept := c.Accounts[:0]
 	for i := range c.Accounts {
 		a := c.Accounts[i]
@@ -337,18 +386,26 @@ func (c *Config) Normalize() error {
 			return fmt.Errorf("accounts[%s]: runtime key already used by another account", a.ID)
 		}
 		runtimeKeys[a.RuntimeKey] = true
-		if !strings.HasPrefix(a.RuntimeKey, "sk-") {
-			return fmt.Errorf("accounts[%s]: runtime key must start with sk-amr-", a.ID)
+		if !ValidRuntimeKey(a.RuntimeKey) {
+			return fmt.Errorf("accounts[%s]: runtime key must start with sk-amr- or rv_", a.ID)
+		}
+		a.Provider = ProviderForKey(a.RuntimeKey) // the key decides, so a swapped key can't leave a stale provider
+		if a.Provider == ProviderRiver && a.ControlKey != "" {
+			return fmt.Errorf("accounts[%s]: river accounts have no control key", a.ID)
 		}
 		if a.ControlKey != "" && !strings.HasPrefix(a.ControlKey, "vela_ctrl_") {
 			return fmt.Errorf("accounts[%s]: control key must start with vela_ctrl_", a.ID)
 		}
 		if a.Group == "" {
-			a.Group = DefaultGroup
+			a.Group = DefaultGroupFor(a.RuntimeKey)
 		}
 		if !groupRe.MatchString(a.Group) {
 			return fmt.Errorf("accounts[%s]: invalid group", a.ID)
 		}
+		if p, ok := groupProvider[a.Group]; ok && p != a.Provider {
+			return fmt.Errorf("accounts[%s]: group %q already holds %s accounts; OpenDesign and River pools must use separate groups", a.ID, a.Group, p)
+		}
+		groupProvider[a.Group] = a.Provider
 		if a.Name == "" {
 			a.Name = a.Email
 		}
@@ -645,7 +702,7 @@ func Mask(key string) string {
 		return ""
 	}
 	prefix := ""
-	for _, p := range []string{"vela_ctrl_", "sk-amr-", "sk-"} {
+	for _, p := range []string{"vela_ctrl_", "sk-amr-", "sk-", RiverKeyPrefix} {
 		if strings.HasPrefix(key, p) {
 			prefix = p
 			break

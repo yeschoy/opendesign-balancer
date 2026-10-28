@@ -404,7 +404,7 @@ function accountForm(a) {
     <label>邮箱</label><input id="f-email" value="${v('email')}">
     <label>分组</label><input id="f-group" value="${v('group', 'default')}" placeholder="default">
     <span class="hint">下游密钥只调度同分组的账号</span>
-    <label>运行密钥</label><input id="f-rt" placeholder="${a ? esc(a.runtimeKey) + '（留空不变）' : 'sk-amr-…'}" autocomplete="off">
+    <label>运行密钥</label><input id="f-rt" placeholder="${a ? esc(a.runtimeKey) + '（留空不变）' : 'sk-amr-… 或 River 的 rv_…'}" autocomplete="off">
     <label>控制密钥</label><input id="f-ctrl" placeholder="${a && a.hasControlKey ? esc(a.controlKey) + '（留空不变）' : 'vela_ctrl_…（可选，用于读额度）'}" autocomplete="off">
     ${a && a.hasControlKey ? '<span></span><label class="check"><input type="checkbox" id="f-clear-ctrl">移除控制密钥</label>' : ''}
     ${a ? `<span></span><span class="keycopy"><button type="button" class="btn small" data-copy="runtimeKey">复制运行密钥</button>${a.hasControlKey ? '<button type="button" class="btn small" data-copy="controlKey">复制控制密钥</button>' : ''}</span>` : ''}
@@ -455,8 +455,8 @@ $('#btn-add-manual').addEventListener('click', async () => {
 });
 $('#btn-import').addEventListener('click', async () => {
   await modal({ title: '批量导入', wide: true,
-    body: `<p class="muted small">每行一个账号：<code>运行密钥[,控制密钥[,名称[,代理URL]]]</code>，逗号、空格或制表符分隔，<code>#</code> 开头为注释。</p>
-      <textarea id="imp-text" class="code" rows="10" placeholder="sk-amr-xxx,vela_ctrl_xxx,账号A&#10;sk-amr-yyy"></textarea>
+    body: `<p class="muted small">每行一个账号：<code>运行密钥[,控制密钥[,名称[,代理URL]]]</code>（<code>rv_</code> 开头的自动识别为 River 账号，无控制密钥），逗号、空格或制表符分隔，<code>#</code> 开头为注释。</p>
+      <textarea id="imp-text" class="code" rows="10" placeholder="sk-amr-xxx,vela_ctrl_xxx,账号A&#10;rv_xxx,River-1"></textarea>
       <div class="row"><label class="muted">分组</label><input id="imp-group" placeholder="default"></div>`,
     buttons: [{ label: '取消', value: 'c' }, { label: '导入', value: 'ok', primary: true, action: async () => {
       const r = await api('POST', '/api/accounts/import', { text: $('#imp-text').value, group: $('#imp-group').value });

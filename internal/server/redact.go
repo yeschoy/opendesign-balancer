@@ -15,13 +15,14 @@ var secretPatterns = []*regexp.Regexp{
 	regexp.MustCompile(`sk-amr-[A-Za-z0-9_-]+`),
 	regexp.MustCompile(`vela_ctrl_[A-Za-z0-9_-]+`),
 	regexp.MustCompile(`sk-[A-Za-z0-9_-]{16,}`),
+	regexp.MustCompile(`\brv_[A-Za-z0-9_-]{16,}`),
 	regexp.MustCompile(`(?i)(socks5h?|https?)://[^\s"'/@]+:[^\s"'/@]+@[^\s"']+`),
 	regexp.MustCompile(`__Secure-better-auth\.session_token=[^;\s"]+`),
 }
 
 // secretHints are cheap substrings: a text with none of them (case-folded)
 // can't match any secretPatterns entry, so the regexes are skipped.
-var secretHints = []string{"bearer", "sk-", "vela_ctrl_", "://", "__secure-better-auth"}
+var secretHints = []string{"bearer", "sk-", "rv_", "vela_ctrl_", "://", "__secure-better-auth"}
 
 type replacerCache struct {
 	cfg *config.Config
