@@ -726,3 +726,28 @@ func TestStripUnsupportedTool(t *testing.T) {
 		t.Fatal("unexpected strip")
 	}
 }
+
+// River offers only OpenAI Chat Completions and Responses: other endpoints
+// (Anthropic Messages, embeddings…) are refused locally, without a call upstream.
+func TestRiverPoolOnlyOpenAIEndpoints(t *testing.T) {
+	e := newEnv(t, []config.Account{{ID: "r1", Group: "default", RuntimeKey: "rv_aaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}, func(c *config.Config) {
+		c.Upstream.RiverBase = c.Upstream.RuntimeBase
+	})
+	for _, path := range []string{"/v1/messages", "/v1/embeddings"} {
+		resp := e.post(path, chat(false), nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: status %d, want 404", path, resp.StatusCode)
+		}
+	}
+	if n := e.up.callCount(); n != 0 {
+		t.Fatalf("%d upstream calls for unsupported endpoints", n)
+	}
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses"} {
+		resp := e.post(path, chat(false), nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d, want 200", path, resp.StatusCode)
+		}
+	}
+}

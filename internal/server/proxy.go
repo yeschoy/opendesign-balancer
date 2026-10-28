@@ -226,6 +226,17 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 // writeLocalError answers in the inbound protocol's error shape.
+// riverPath: the inference endpoints River offers (OpenAI Chat Completions
+// and Responses, including sub-paths such as /v1/responses/{id}).
+func riverPath(p string) bool {
+	for _, base := range []string{"/v1/chat/completions", "/v1/responses"} {
+		if p == base || strings.HasPrefix(p, base+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 func writeLocalError(w http.ResponseWriter, proto string, status int, typ, code, msg string, retryAfter int) {
 	if retryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
@@ -326,6 +337,13 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 	}
 	rec.ClientKeyID, rec.ClientKeyName, rec.Group = ck.ID, ck.Name, ck.Group
 	rec.Provider = cfg.GroupProvider(ck.Group)
+	if rec.Provider == config.ProviderRiver && !riverPath(r.URL.Path) {
+		// River serves only OpenAI Chat Completions and Responses
+		rec.ErrorCategory = "request"
+		writeLocalError(w, proto, http.StatusNotFound, "invalid_request_error", "unsupported_endpoint", "this pool (River) only supports /v1/chat/completions and /v1/responses", 0)
+		finish(http.StatusNotFound, "failed")
+		return
+	}
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(cfg.Routing.MaxBodyMB)<<20))
 	if err != nil {
 		var mbe *http.MaxBytesError
