@@ -42,6 +42,16 @@ docker compose up -d --build
 - 数据在 `./data`，升级：`git pull && docker compose up -d --build`；回滚：切回旧版本后同样重建。
 - 停止时会等待在途请求最多 30 秒（`stop_grace_period: 35s`）。
 
+## River 号池（docs.river.ai）
+
+除 OpenDesign 外也支持 [River](https://docs.river.ai/) 的 API Key（`rv_` 开头）。上游 `https://api.river.ai/v1`（设置 `upstream.riverBase` 可改），OpenAI 兼容，`Authorization: Bearer rv_…`。
+
+- 账号的 `provider` 由运行密钥前缀自动决定：`rv_` → `river`，`sk-` → `opendesign`；手动添加、批量导入、开放导入接口都认 `rv_`。River 没有控制面，不能填控制密钥。
+- 额度未知，靠错误推断：River 的 402（余额不足）按“余额不足”规则逐次翻倍冷却，429 按 `Retry-After` 冷却，401 冷却后换号。**已有实例需在“路由设置”点“恢复默认规则”再保存**才有新增的 401/402 规则。
+- 每把 key 的 `/v1/models` 作为可用模型表，River 模型名形如 `deepseek-ai/DeepSeek-V4.1-Flash`。
+- **两个号池完全分开**：River 账号不指定分组时进 `river` 组，OpenDesign 账号进 `default` 组；一个分组只能放同一种账号，混放会被拒绝保存。各池各建下游密钥（「下游密钥」页，分组分别填 `default` 和 `river`），密钥只调度本组账号，互不借号，用哪个池就给下游配哪把密钥（new-api 里建两个渠道）。导入密钥的默认分组为 `default` 时，`rv_` 账号自动进 `river`。
+- River 文档没有公布每 key 的并发/RPM 上限，需要时在账号上手设 `maxConcurrent` / `maxRpm`。
+
 ## 下游接口
 
 | 路径 | 说明 |
