@@ -35,6 +35,7 @@ const (
 // stagedAccount is an import held back because it collides with an account.
 type stagedAccount struct {
 	ID          string    `json:"id"`
+	Provider    string    `json:"provider,omitempty"`
 	Name        string    `json:"name"`
 	Group       string    `json:"group"`
 	Note        string    `json:"note"`
@@ -209,6 +210,9 @@ type importItem struct {
 	Group      string `json:"group"`
 	Note       string `json:"note"`
 	ProxyURL   string `json:"proxyUrl"`
+	// Provider names the pool of a key no prefix identifies (an Ollama API
+	// key); "" means the key's prefix decides.
+	Provider string `json:"provider"`
 	// Also accepted, as some clients name them this way.
 	APIKey string `json:"apiKey"`
 	Key    string `json:"key"`
@@ -324,20 +328,30 @@ func (s *Server) importOne(ik config.ImportKey, it importItem, now time.Time) im
 	controlKey := strings.TrimSpace(it.ControlKey)
 	name := strings.TrimSpace(it.Name)
 	group := strings.TrimSpace(it.Group)
+	if p := strings.TrimSpace(it.Provider); p != "" && !config.KnownProvider(p) {
+		return importResult{Status: "error", Name: name, Error: "provider must be opendesign, river or ollama"}
+	}
+	// the item's own provider wins, else the import key's pool (it names the
+	// pool its accounts join), else the key's prefix
+	declared := strings.TrimSpace(it.Provider)
+	if declared == "" && ik.Provider != "" {
+		declared = ik.Provider
+	}
+	provider := config.ResolveProvider(declared, runtimeKey)
 	if group == "" {
 		group = ik.Group
 		if group == config.DefaultGroup {
-			group = config.DefaultGroupFor(runtimeKey) // River keys go to their own pool
+			group = config.GroupForProvider(provider) // each pool keeps its own group
 		}
 	}
 	fail := func(msg string) importResult { return importResult{Status: "error", Name: name, Error: msg} }
 	switch {
 	case runtimeKey == "":
 		return fail("runtimeKey is required")
-	case !config.ValidRuntimeKey(runtimeKey) || len(runtimeKey) > 512:
-		return fail("runtimeKey must start with sk-amr- or rv_")
-	case controlKey != "" && config.ProviderForKey(runtimeKey) == config.ProviderRiver:
-		return fail("river accounts have no controlKey")
+	case !config.ValidRuntimeKeyFor(provider, runtimeKey) || len(runtimeKey) > 512:
+		return fail("runtimeKey must start with sk-amr- (OpenDesign) or rv_ (River); an Ollama key has no prefix and needs \"provider\":\"ollama\"")
+	case controlKey != "" && provider != config.ProviderOpenDesign:
+		return fail(provider + " accounts have no controlKey")
 	case controlKey != "" && (!strings.HasPrefix(controlKey, "vela_ctrl_") || len(controlKey) > 512):
 		return fail("controlKey must start with vela_ctrl_")
 	case len([]rune(name)) > 50:
@@ -350,7 +364,7 @@ func (s *Server) importOne(ik config.ImportKey, it importItem, now time.Time) im
 	}
 	keyName := importKeyName(ik)
 	for attempt := 0; ; attempt++ {
-		res, retry := s.importDecide(ik, it, now, keyName, runtimeKey, controlKey, name, group)
+		res, retry := s.importDecide(ik, it, now, keyName, runtimeKey, controlKey, name, group, provider)
 		if !retry || attempt >= 3 {
 			return res
 		}
@@ -359,7 +373,7 @@ func (s *Server) importOne(ik config.ImportKey, it importItem, now time.Time) im
 
 // importDecide is one attempt of importOne; retry asks for another look
 // because a conflict appeared between the read and the write.
-func (s *Server) importDecide(ik config.ImportKey, it importItem, now time.Time, keyName, runtimeKey, controlKey, name, group string) (res importResult, retry bool) {
+func (s *Server) importDecide(ik config.ImportKey, it importItem, now time.Time, keyName, runtimeKey, controlKey, name, group, provider string) (res importResult, retry bool) {
 	fail := func(msg string) importResult { return importResult{Status: "error", Name: name, Error: msg} }
 	cfg := s.cfg.Get()
 	conflicts := findConflicts(cfg, runtimeKey, controlKey, name)
@@ -370,7 +384,7 @@ func (s *Server) importDecide(ik config.ImportKey, it importItem, now time.Time,
 				return importResult{Status: "unchanged", AccountID: a.ID, Name: a.Name, Conflicts: conflicts}, false
 			}
 		}
-		st := stagedAccount{ID: config.NewID("stg_"), Name: name, Group: group, Note: strings.TrimSpace(it.Note), RuntimeKey: runtimeKey,
+		st := stagedAccount{ID: config.NewID("stg_"), Provider: provider, Name: name, Group: group, Note: strings.TrimSpace(it.Note), RuntimeKey: runtimeKey,
 			ControlKey: controlKey, ProxyURL: strings.TrimSpace(it.ProxyURL), ImportedAt: now, UpdatedAt: now, ImportKey: keyName, ImportKeyID: ik.ID}
 		id, replaced, err := s.staging.put(st)
 		if err != nil {
@@ -379,7 +393,7 @@ func (s *Server) importDecide(ik config.ImportKey, it importItem, now time.Time,
 		log.Printf("open import: staged %s (%s) via import key %s, %d conflict(s), replaced=%v", id, name, ik.ID, len(conflicts), replaced)
 		return importResult{Status: "staged", StageID: id, Name: name, Conflicts: conflicts}, false
 	}
-	a := config.Account{ID: config.NewID("acc_"), Name: name, Group: group, Enabled: true, RuntimeKey: runtimeKey, ControlKey: controlKey,
+	a := config.Account{ID: config.NewID("acc_"), Provider: provider, Name: name, Group: group, Enabled: true, RuntimeKey: runtimeKey, ControlKey: controlKey,
 		ProxyURL: strings.TrimSpace(it.ProxyURL), Note: importNote(now, keyName, it.Note), CreatedAt: now}
 	_, err := s.cfg.Update(-1, func(c *config.Config) error {
 		// re-check inside the writer: two imports of one key may race
@@ -440,7 +454,7 @@ func (s *Server) apiStaging(w http.ResponseWriter, r *http.Request) {
 	if want := providerParam(r); want != "" {
 		kept := items[:0]
 		for _, it := range items {
-			if config.ProviderForKey(it.stagedAccount.RuntimeKey) == want {
+			if config.ResolveProvider(it.stagedAccount.Provider, it.stagedAccount.RuntimeKey) == want {
 				kept = append(kept, it)
 			}
 		}
@@ -470,7 +484,7 @@ func (s *Server) applyStaged(id, action, target string) (string, error) {
 			if hasReason(cs, "runtimeKey") {
 				return errors.New("另一个账号已持有这把运行密钥，只能覆盖它或丢弃")
 			}
-			a := config.Account{ID: config.NewID("acc_"), Name: st.Name, Group: st.Group, Enabled: true, RuntimeKey: st.RuntimeKey, ControlKey: st.ControlKey,
+			a := config.Account{ID: config.NewID("acc_"), Provider: st.Provider, Name: st.Name, Group: st.Group, Enabled: true, RuntimeKey: st.RuntimeKey, ControlKey: st.ControlKey,
 				ProxyURL: st.ProxyURL, Note: importNote(st.ImportedAt, st.ImportKey, st.Note), CreatedAt: now}
 			c.Accounts = append(c.Accounts, a)
 			accountID = a.ID
@@ -573,7 +587,7 @@ func (s *Server) apiImportKeys(w http.ResponseWriter, r *http.Request) {
 	out := []view{}
 	want := providerParam(r)
 	for _, k := range cfg.ImportKeys {
-		if want != "" && providerOf(cfg.GroupProvider(k.Group)) != want {
+		if want != "" && importKeyPool(cfg, k) != want {
 			continue
 		}
 		out = append(out, view{k.ID, k.Name, k.Group, k.KeyPrefix, k.Key, k.Enabled, k.CreatedAt})
@@ -583,15 +597,26 @@ func (s *Server) apiImportKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiCreateImportKey(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Name  string `json:"name"`
-		Group string `json:"group"`
+		Name     string `json:"name"`
+		Group    string `json:"group"`
+		Provider string `json:"provider"`
 	}
 	if err := readBody(r, &in); err != nil {
 		apiError(w, http.StatusBadRequest, err)
 		return
 	}
+	// the pool is written on the key itself, so accounts it imports join that
+	// pool's group even before the key's own group holds an account
+	provider := strings.TrimSpace(in.Provider)
+	if provider == "" {
+		provider = providerParam(r)
+	}
+	if provider != "" && !config.KnownProvider(provider) {
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
+		return
+	}
 	key := importKeyPrefix + randHex(24)
-	k := config.ImportKey{ID: config.NewID("ik_"), Name: strings.TrimSpace(in.Name), Group: strings.TrimSpace(in.Group),
+	k := config.ImportKey{ID: config.NewID("ik_"), Name: strings.TrimSpace(in.Name), Group: strings.TrimSpace(in.Group), Provider: provider,
 		KeyHash: config.HashKey(key), KeyPrefix: key[:len(importKeyPrefix)+4] + "…" + key[len(key)-4:], Key: key, Enabled: true, CreatedAt: time.Now().UTC()}
 	if _, err := s.cfg.Update(-1, func(c *config.Config) error { c.ImportKeys = append(c.ImportKeys, k); return nil }); err != nil {
 		s.configError(w, err)
@@ -603,12 +628,17 @@ func (s *Server) apiCreateImportKey(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiUpdateImportKey(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var in struct {
-		Name    *string `json:"name"`
-		Group   *string `json:"group"`
-		Enabled *bool   `json:"enabled"`
+		Name     *string `json:"name"`
+		Group    *string `json:"group"`
+		Provider *string `json:"provider"`
+		Enabled  *bool   `json:"enabled"`
 	}
 	if err := readBody(r, &in); err != nil {
 		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	if in.Provider != nil && !config.KnownProvider(strings.TrimSpace(*in.Provider)) {
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
 		return
 	}
 	_, err := s.cfg.Update(-1, func(c *config.Config) error {
@@ -620,8 +650,23 @@ func (s *Server) apiUpdateImportKey(w http.ResponseWriter, r *http.Request) {
 			if in.Name != nil {
 				k.Name = strings.TrimSpace(*in.Name)
 			}
-			if in.Group != nil {
-				k.Group = strings.TrimSpace(*in.Group)
+			if in.Group != nil && strings.TrimSpace(*in.Group) != k.Group {
+				// a key may only move to a group of its own pool
+				group := strings.TrimSpace(*in.Group)
+				pool := c.GroupPool(group)
+				if want := in.Provider; want != nil {
+					pool = strings.TrimSpace(*want)
+				}
+				if pool == "" {
+					pool = k.Provider
+				}
+				if pool != k.Provider {
+					return fmt.Errorf("group %q 属于 %s 号池，这把导入密钥属于 %s 号池：同一把密钥不能换池，请新建密钥", group, pool, k.Provider)
+				}
+				k.Group = group
+			}
+			if in.Provider != nil {
+				k.Provider = strings.TrimSpace(*in.Provider)
 			}
 			if in.Enabled != nil {
 				k.Enabled = *in.Enabled
@@ -656,3 +701,15 @@ func (s *Server) apiDeleteImportKey(w http.ResponseWriter, r *http.Request) {
 }
 
 func stagingPath(dataDir string) string { return filepath.Join(dataDir, "staging.json") }
+
+// importKeyPool is the pool an import key feeds: its stored provider when the
+// group has no account to say otherwise.
+func importKeyPool(cfg *config.Config, k config.ImportKey) string {
+	if p := cfg.GroupProvider(k.Group); p != "" {
+		return p
+	}
+	if k.Provider != "" {
+		return k.Provider
+	}
+	return providerOf(cfg.GroupPool(k.Group))
+}

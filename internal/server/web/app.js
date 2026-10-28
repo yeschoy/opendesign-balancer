@@ -9,8 +9,14 @@ let settingsCache = null;
 let currentPage = 'overview';
 let refreshTimer = null;
 // the pool tab on top: every list, overview and log shows one pool only
-let pool = ['opendesign', 'river'].includes(localStorage.getItem('odb-pool')) ? localStorage.getItem('odb-pool') : 'opendesign';
-const POOL_LABEL = { opendesign: 'OpenDesign', river: 'River' };
+const POOLS = ['opendesign', 'river', 'ollama'];
+let pool = POOLS.includes(localStorage.getItem('odb-pool')) ? localStorage.getItem('odb-pool') : 'opendesign';
+const POOL_LABEL = { opendesign: 'OpenDesign', river: 'River', ollama: 'Ollama' };
+// the default group of each pool, and what its keys look like
+const POOL_GROUP = { opendesign: 'default', river: 'river', ollama: 'ollama' };
+const defaultGroup = () => POOL_GROUP[pool] || 'default';
+const isOllama = () => pool === 'ollama';
+const RT_HINT = { opendesign: 'sk-amr-…', river: 'rv_…', ollama: 'ollama.com/settings/keys 签发的 key 原样粘贴' };
 const withPool = (path) => path + (path.includes('?') ? '&' : '?') + 'provider=' + pool;
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -189,8 +195,15 @@ function renderPoolTabs() {
   $$('#pool-tabs .pool-tab').forEach((b) => b.classList.toggle('active', b.dataset.pool === pool));
   document.title = POOL_LABEL[pool] + ' 账号池';
   document.body.dataset.pool = pool;
-  $('#btn-add-device').classList.toggle('hidden', pool === 'river');
-  $('#acc-empty').textContent = pool === 'river' ? '还没有 River 账号。点「批量导入」粘贴 rv_ 开头的 key，每行一个。' : '还没有账号。点「设备授权添加」，在已登录该账号的浏览器里批准即可。';
+  $('#btn-add-device').classList.toggle('hidden', pool !== 'opendesign');
+  // the last two columns of the account table mean different things per pool
+  const heads = { windows: { opendesign: 'Design Plan 窗口', river: '额度', ollama: '额度（/api/balance）' },
+    wallet: { opendesign: '钱包 / 套餐模型额度', river: '24h 用量', ollama: '已购额度 / 24h 用量' } };
+  $$('#acc-table th[data-head]').forEach((th) => { th.textContent = heads[th.dataset.head][pool] || ''; });
+  $('#acc-empty').textContent = {
+    river: '还没有 River 账号。点「批量导入」粘贴 rv_ 开头的 key，每行一个。',
+    ollama: '还没有 Ollama 账号。点「批量导入」一行一个 key（ollama.com/settings/keys 签发，本池的 key 不要求前缀），或「手动添加」。',
+  }[pool] || '还没有账号。点「设备授权添加」，在已登录该账号的浏览器里批准即可。';
 }
 $('#pool-tabs').addEventListener('click', (ev) => {
   const b = ev.target.closest('.pool-tab');
@@ -213,8 +226,9 @@ async function loadOverview() {
   const ok = o.status.ok || 0;
   const cards = [
     ['账号', `${ok} / ${o.accounts}`, `可调度 / 总数${o.authFailed ? ` · ${o.authFailed} 个控制密钥失效` : ''}`],
-    ...(pool === 'river' ? [] : o.windows).map((w) => [`${fmtDur(w.durationSeconds)}窗口剩余`, num(w.remaining), `共 ${num(w.limit)} · ${w.workspaces} 个工作区 · 已用 ${w.limit ? (w.used / w.limit * 100).toFixed(1) : 0}%`]),
-    ...(pool === 'river' ? [] : [['钱包合计', '$' + o.walletUsd.toFixed(2), `${o.walletAccounts} 个工作区`]]),
+    ...(pool !== 'opendesign' ? [] : o.windows).map((w) => [`${fmtDur(w.durationSeconds)}窗口剩余`, num(w.remaining), `共 ${num(w.limit)} · ${w.workspaces} 个工作区 · 已用 ${w.limit ? (w.used / w.limit * 100).toFixed(1) : 0}%`]),
+    ...(pool !== 'opendesign' ? [] : [['钱包合计', '$' + o.walletUsd.toFixed(2), `${o.walletAccounts} 个工作区`]]),
+    ...(pool === 'ollama' && o.ollamaAccounts ? [['Ollama 额度合计', '$' + o.ollamaCredits.toFixed(2), `${o.ollamaAccounts} 个账号（含赠送额度 + 已购额度，同一团队的 key 会重复计）`]] : []),
     ['24h 请求', num(st.r), `成功率 ${okRate === null ? '—' : pct(okRate)} · 近 1h ${num(o.stats.lastHour.r)}`],
     ['24h 费用', costSum(st), '按模型价格估算，未配价格的不计'],
     ['24h 缓存命中率', hitRate(st) === null ? '—' : pct(hitRate(st)), `缓存 ${num(st.k)} / 提示 ${num(st.p)} token`],
@@ -243,7 +257,7 @@ async function loadOverview() {
   $('#ov-windows').innerHTML = o.windows.length ? o.windows.map((w) => {
     const used = w.limit ? w.used / w.limit * 100 : 0;
     return `<div class="win"><div class="row"><b>${esc(fmtDur(w.durationSeconds))}</b><span class="muted">剩余 ${num(w.remaining)} / ${num(w.limit)} credits</span></div><div class="bar ${used >= 98 ? 'bad' : used >= 90 ? 'warn' : ''}"><i data-w="${used}"></i></div></div>`;
-  }).join('') : `<p class="muted">${pool === 'river' ? 'River 没有额度接口，额度用完靠上游 402 / 429 错误推断冷却。' : '暂无额度数据（需要账号配置 vela_ctrl_ 控制密钥）。'}</p>`;
+  }).join('') : `<p class="muted">${pool === 'river' ? 'River 没有额度接口，额度用完靠上游 402 / 429 错误推断冷却。' : pool === 'ollama' ? '暂无余额数据：Ollama 的 key 直接读 /api/balance，30 秒内不会重复读（该接口每个用户每分钟限 10 次）。' : '暂无额度数据（需要账号配置 vela_ctrl_ 控制密钥）。'}</p>`;
   applyWidths($('#ov-windows'));
   $('#ov-status').innerHTML = Object.entries(o.status).map(([k, v]) => `<span class="badge ${statusClass(k)}">${esc(statusLabel(k))} ${v}</span>`).join('') || '<span class="muted">无账号</span>';
   $('#ov-updated').textContent = '更新于 ' + fmtTime(o.stats.generated);
@@ -254,7 +268,38 @@ const STATUS = { ok: ['可用', 'ok'], disabled: ['已禁用', ''], cooldown: ['
 const statusLabel = (s) => (STATUS[s] || [s])[0];
 const statusClass = (s) => (STATUS[s] || ['', ''])[1];
 
+// ollamaQuotaHTML shows an Ollama account's credits: the included allowance
+// of the current period (or a legacy plan's session/weekly percentages) and
+// the purchased balance next to it.
+function ollamaQuotaHTML(a) {
+  const q = a.quota;
+  const u = a.usage24h || {};
+  const usage = `<div class="acc-sub">24h：${num(u.r || 0)} 次 · ${num((u.i || 0) + (u.o || 0))} tokens</div>`;
+  if (!q || !q.ollama) return '<span class="muted small">等待首次读取…</span>' + usage;
+  const b = q.ollama;
+  const parts = [];
+  if (q.authFailed) parts.push('<span class="badge bad">API Key 失效，需换 key</span>');
+  else if (q.lastError) parts.push(`<div class="acc-sub" title="${esc(q.lastError)}">读取出错：${esc(q.lastError)}</div>`);
+  const bar = (used) => `<div class="bar ${used >= 98 ? 'bad' : used >= 90 ? 'warn' : ''}"><i data-w="${used}"></i></div>`;
+  if (b.includedUsd !== undefined && b.includedUsd !== '') {
+    const left = parseFloat(b.includedUsd), all = parseFloat(b.allowanceUsd);
+    const used = Number.isFinite(left) && Number.isFinite(all) && all > 0 ? (all - left) / all * 100 : 0;
+    parts.push(`<div class="win"><div class="acc-sub">赠送额度 · 剩余 <b>${usd(b.includedUsd)}</b> / ${usd(b.allowanceUsd)}</div>${bar(used)}`
+      + (b.periodUntil ? `<div class="acc-sub">周期至 ${esc(fmtTime(b.periodUntil, true))}（${esc(fmtIn(b.periodUntil))}）</div>` : '') + `</div>`);
+  }
+  for (const [label, pctLeft, reset] of [['会话额度', b.sessionPercent, b.sessionResetsAt], ['周额度', b.weeklyPercent, b.weeklyResetsAt]]) {
+    if (pctLeft === undefined || pctLeft < 0) continue;
+    parts.push(`<div class="win"><div class="acc-sub">${label} · 剩余 <b>${num(pctLeft)}%</b></div>${bar(100 - pctLeft)}`
+      + (reset ? `<div class="acc-sub">重置 ${esc(fmtTime(reset, true))}（${esc(fmtIn(reset))}）</div>` : '') + `</div>`);
+  }
+  parts.push(`<div class="acc-sub">已购额度 ${usd(b.purchasedUsd)}</div>`);
+  if (!a.quotaFresh) parts.push('<span class="badge warn">数据过期</span>');
+  parts.push(usage);
+  return parts.join('');
+}
+
 function windowsHTML(a) {
+  if (a.provider === 'ollama') return ollamaQuotaHTML(a);
   const q = a.quota;
   if (!a.hasControlKey) {
     const u = a.usage24h || {};
@@ -294,16 +339,24 @@ function accountRow(a) {
   if (strikes.length) status += `<div class="acc-sub" title="连续余额不足次数，冷却按次数翻倍，成功一次清零">连续失败：${strikes.map(([k, n]) => esc(k) + '×' + n).join(' ')}</div>`;
   if (models.length) status += `<div class="acc-sub" title="${esc(models.map(([m, s]) => m + ' 至 ' + fmtTime(s.cooldownUntil, true) + ' (' + s.ruleId + ')').join('\n'))}">${models.length} 个模型冷却中</div>`;
   const q = a.quota;
-  const wallet = q && q.walletUsd !== undefined && q.walletUsd !== '' ? usd(q.walletUsd) + (q.walletSource === 'preflight' ? '<div class="acc-sub">来源 preflight</div>' : '') : '—';
   const credits = (v) => { const f = parseFloat(v); return Number.isFinite(f) ? num(f) : '—'; };
-  const pkg = q && q.summary ? `<div class="acc-sub" title="套餐模型额度：Design Plan 窗口用尽后、以及调用套餐模型（Claude Sonnet、GPT-6 Sol、Gemini 等）时扣这里，按计费周期重置不结转">套餐模型 ${credits(q.summary.subscriptionCredits)}</div><div class="acc-sub">充值 ${credits(q.summary.rechargeCredits)}</div>` : '';
-  const cov = q && q.coverage ? Object.entries(q.coverage) : [];
+  // Ollama keeps its own three amounts: included, purchased, and what this
+  // pool sent in the last 24h
+  const ollama = a.provider === 'ollama';
+  const ou = a.usage24h || {};
+  const wallet = ollama
+    ? (q && q.ollama && q.ollama.purchasedUsd !== undefined && q.ollama.purchasedUsd !== ''
+      ? usd(q.ollama.purchasedUsd) + `<div class="acc-sub">24h ${num(ou.r || 0)} 次 · ${num((ou.i || 0) + (ou.o || 0))} tokens</div>` : '—')
+    : (q && q.walletUsd !== undefined && q.walletUsd !== '' ? usd(q.walletUsd) + (q.walletSource === 'preflight' ? '<div class="acc-sub">来源 preflight</div>' : '') : '—');
+  const pkg = !ollama && q && q.summary ? `<div class="acc-sub" title="套餐模型额度：Design Plan 窗口用尽后、以及调用套餐模型（Claude Sonnet、GPT-6 Sol、Gemini 等）时扣这里，按计费周期重置不结转">套餐模型 ${credits(q.summary.subscriptionCredits)}</div><div class="acc-sub">充值 ${credits(q.summary.rechargeCredits)}</div>` : '';
+  const cov = !ollama && q && q.coverage ? Object.entries(q.coverage) : [];
   const cat = q && q.catalog ? Object.entries(q.catalog) : [];
   const catOn = cat.filter(([, en]) => en).map(([m]) => m).sort();
-  const catHTML = cat.length ? `<div class="acc-sub" title="${esc('该 API Key 的模型列表（/v1/models），决定套餐能调用哪些模型：\n' + catOn.join('\n'))}">可用模型 ${catOn.length}${cat.length > catOn.length ? ' / ' + cat.length : ''} 个</div>` : (q && q.catalogError ? `<div class="acc-sub">模型列表读取失败：${esc(q.catalogError)}</div>` : '');
+  const catTitle = ollama ? '该 key 的 /v1/models（Ollama 云端目录对所有 key 相同）：\n' : '该 API Key 的模型列表（/v1/models），决定套餐能调用哪些模型：\n';
+  const catHTML = cat.length ? `<div class="acc-sub" title="${esc(catTitle + catOn.join('\n'))}">可用模型 ${catOn.length}${cat.length > catOn.length ? ' / ' + cat.length : ''} 个</div>` : (q && q.catalogError ? `<div class="acc-sub">模型列表读取失败：${esc(q.catalogError)}</div>` : '');
   status += catHTML;
   const covHTML = cov.length ? `<div class="acc-sub" title="${esc(cov.map(([m, c]) => m + '：' + (c.covered === true ? 'Design Plan 模型' : c.covered === false ? '套餐模型' : '未知')).join('\n'))}">已识别 ${cov.length} 个模型的类别</div>` : '';
-  const sum = q && q.summary ? `<div class="acc-sub" title="累计消费 ${esc(q.summary.totalConsumedUsd)} · 累计充值 ${esc(q.summary.totalRechargedUsd)} · 调用 ${esc(q.summary.usageCount)} 次">今日 ${esc(usd(q.summary.todayConsumedUsd))}</div>` : '';
+  const sum = !ollama && q && q.summary ? `<div class="acc-sub" title="累计消费 ${esc(q.summary.totalConsumedUsd)} · 累计充值 ${esc(q.summary.totalRechargedUsd)} · 调用 ${esc(q.summary.usageCount)} 次">今日 ${esc(usd(q.summary.todayConsumedUsd))}</div>` : '';
   const tier = q && (q.tier || q.membershipTier) ? `<span class="badge accent">${esc(q.tier || q.membershipTier)}</span>` : '';
   const shared = a.sharedWorkspaceWith && a.sharedWorkspaceWith.length ? `<span class="badge warn" title="与其他账号同一工作区，额度共享">共享工作区</span>` : '';
   return `<tr data-id="${esc(a.id)}">
@@ -387,7 +440,7 @@ document.addEventListener('click', (ev) => {
   const id = btn.closest('tr').dataset.id;
   const a = accountsCache.find((x) => x.id === id);
   if (!a) return;
-  const items = [['edit', '编辑'], ['test', '测试连通'], ['refresh', '刷新额度'], ['recover', '恢复（清除冷却/隔离）'], ['reset-health', '重置健康分'], ['reauth', '重新设备授权'], ['toggle', a.enabled ? '禁用' : '启用'], ['delete', '删除', 'danger']];
+  const items = [['edit', '编辑'], ['test', '测试连通'], ['refresh', a.provider === 'ollama' ? '刷新余额' : '刷新额度'], ['recover', '恢复（清除冷却/隔离）'], ['reset-health', '重置健康分'], ...(a.provider === 'opendesign' ? [['reauth', '重新设备授权']] : []), ['toggle', a.enabled ? '禁用' : '启用'], ['delete', '删除', 'danger']];
   const list = document.createElement('div');
   list.className = 'menu-list';
   list.innerHTML = items.map(([k, l, c]) => `<button data-act="${k}" class="${c || ''}">${esc(l)}</button>`).join('');
@@ -422,16 +475,18 @@ async function accountAction(a, act) {
 
 function accountForm(a) {
   const v = (k, d = '') => esc(a ? (a[k] ?? d) : d);
-  const defGroup = pool === 'river' ? 'river' : 'default';
+  const defGroup = defaultGroup();
   return `<div class="form">
     <label>名称</label><input id="f-name" value="${v('name')}" maxlength="50">
     <label>邮箱</label><input id="f-email" value="${v('email')}">
     <label>分组</label><input id="f-group" value="${v('group', defGroup)}" placeholder="${defGroup}">
     <span class="hint">下游密钥只调度同分组的账号</span>
-    <label>运行密钥</label><input id="f-rt" placeholder="${a ? esc(a.runtimeKey) + '（留空不变）' : 'sk-amr-… 或 River 的 rv_…'}" autocomplete="off">
-    <label>控制密钥</label><input id="f-ctrl" placeholder="${a && a.hasControlKey ? esc(a.controlKey) + '（留空不变）' : 'vela_ctrl_…（可选，用于读额度）'}" autocomplete="off">
-    ${a && a.hasControlKey ? '<span></span><label class="check"><input type="checkbox" id="f-clear-ctrl">移除控制密钥</label>' : ''}
+    <label>运行密钥</label><input id="f-rt" placeholder="${a ? esc(a.runtimeKey) + '（留空不变）' : RT_HINT[pool] || RT_HINT.opendesign}" autocomplete="off">
+    ${isOllama() ? `<span></span><span class="hint">Ollama 的 key 直接读 /api/balance，没有单独的控制密钥；自建服务填任意值（如 <code>ollama</code>）即可</span>`
+      : `<label>控制密钥</label><input id="f-ctrl" placeholder="${a && a.hasControlKey ? esc(a.controlKey) + '（留空不变）' : 'vela_ctrl_…（可选，用于读额度）'}" autocomplete="off">
+    ${a && a.hasControlKey ? '<span></span><label class="check"><input type="checkbox" id="f-clear-ctrl">移除控制密钥</label>' : ''}`}
     ${a ? `<span></span><span class="keycopy"><button type="button" class="btn small" data-copy="runtimeKey">复制运行密钥</button>${a.hasControlKey ? '<button type="button" class="btn small" data-copy="controlKey">复制控制密钥</button>' : ''}</span>` : ''}
+    ${!a ? `<span></span><span class="hint">新账号进 ${POOL_LABEL[pool]} 号池${isOllama() ? '（provider=ollama）' : ''}</span>` : ''}
     <label>最大并发</label><input id="f-conc" type="number" min="0" value="${v('maxConcurrent', 0)}">
     <span class="hint">0 表示不限</span>
     <label>每分钟请求</label><input id="f-rpm" type="number" min="0" value="${v('maxRpm', 0)}">
@@ -449,7 +504,8 @@ function readAccountForm() {
   const out = { name: $('#f-name').value, email: $('#f-email').value, group: $('#f-group').value, note: $('#f-note').value,
     maxConcurrent: n('#f-conc'), maxRpm: n('#f-rpm'), weight: n('#f-weight'), priority: n('#f-prio'), enabled: $('#f-enabled').checked };
   if ($('#f-rt').value.trim()) out.runtimeKey = $('#f-rt').value.trim();
-  if ($('#f-ctrl').value.trim()) out.controlKey = $('#f-ctrl').value.trim();
+  if ($('#f-ctrl') && $('#f-ctrl').value.trim()) out.controlKey = $('#f-ctrl').value.trim();
+  if (isOllama()) out.provider = 'ollama'; // an Ollama key has no prefix to read this from
   if ($('#f-proxy').value.trim()) out.proxyUrl = $('#f-proxy').value.trim();
   if ($('#f-clear-ctrl') && $('#f-clear-ctrl').checked) out.clearControlKey = true;
   if ($('#f-clear-proxy') && $('#f-clear-proxy').checked) out.clearProxy = true;
@@ -478,12 +534,16 @@ $('#btn-add-manual').addEventListener('click', async () => {
   loadAccounts().catch(() => {});
 });
 $('#btn-import').addEventListener('click', async () => {
+  const help = isOllama()
+    ? `<p class="muted small">每行一个账号：<code>运行密钥[,名称[,代理URL]]</code>。Ollama 的 key 没有固定前缀，导入时整行按本池默认的 <code>provider=ollama</code> 处理；也可以在行首写 <code>provider:ollama</code> 明确指定。逗号、空格或制表符分隔，<code>#</code> 开头为注释。</p>`
+    : `<p class="muted small">每行一个账号：<code>运行密钥[,控制密钥[,名称[,代理URL]]]</code>（<code>rv_</code> 开头的自动识别为 River 账号，无控制密钥），逗号、空格或制表符分隔，<code>#</code> 开头为注释。行首可写 <code>provider:ollama</code> 指定 Ollama 号池。</p>`;
+  const ph = { opendesign: 'sk-amr-xxx,vela_ctrl_xxx,账号A\nrv_xxx,River-1', river: 'rv_xxx,River-1', ollama: 'xxxxxxxxxxxxxxxxxxxxxxxx,ollama-1' }[pool];
   await modal({ title: '批量导入', wide: true,
-    body: `<p class="muted small">每行一个账号：<code>运行密钥[,控制密钥[,名称[,代理URL]]]</code>（<code>rv_</code> 开头的自动识别为 River 账号，无控制密钥），逗号、空格或制表符分隔，<code>#</code> 开头为注释。</p>
-      <textarea id="imp-text" class="code" rows="10" placeholder="sk-amr-xxx,vela_ctrl_xxx,账号A&#10;rv_xxx,River-1"></textarea>
-      <div class="row"><label class="muted">分组</label><input id="imp-group" placeholder="${pool === 'river' ? 'river' : 'default'}"></div>`,
+    body: `${help}
+      <textarea id="imp-text" class="code" rows="10" placeholder="${esc(ph)}"></textarea>
+      <div class="row"><label class="muted">分组</label><input id="imp-group" placeholder="${defaultGroup()}"></div>`,
     buttons: [{ label: '取消', value: 'c' }, { label: '导入', value: 'ok', primary: true, action: async () => {
-      const r = await api('POST', '/api/accounts/import', { text: $('#imp-text').value, group: $('#imp-group').value });
+      const r = await api('POST', '/api/accounts/import', { text: $('#imp-text').value, group: $('#imp-group').value, provider: isOllama() ? 'ollama' : '' });
       toast(`已导入 ${r.added} 个账号`);
     } }] });
   loadAccounts().catch(() => {});
@@ -496,8 +556,8 @@ async function testAccount(a) {
     $('#test-out').textContent = JSON.stringify(r, null, 2);
   };
   await modal({ title: '测试 ' + a.name, wide: true,
-    body: `<p class="muted small">「免费检查」只读取模型列表和工作区，不消耗额度。「真实请求」会发一条 max_tokens=1 的推理，消耗少量 credits。</p>
-      <div class="row"><input id="test-model" placeholder="真实请求模型，默认 deepseek-v4.1-flash" size="34"></div>
+    body: `<p class="muted small">「免费检查」只读取${a.provider === 'ollama' ? '模型列表和 /api/balance 余额' : '模型列表和工作区'}，不消耗额度。「真实请求」会发一条 max_tokens=1 的推理，消耗少量 credits。</p>
+      <div class="row"><input id="test-model" placeholder="真实请求模型，默认 ${esc(a.provider === 'ollama' ? 'gpt-oss:20b' : a.provider === 'river' ? 'deepseek-ai/DeepSeek-V4.1-Flash' : 'deepseek-v4.1-flash')}" size="34"></div>
       <pre id="test-out" class="mt">点击下方按钮开始</pre>`,
     buttons: [{ label: '关闭', value: 'c' }, { label: '真实请求', value: 'inf', action: async () => { await run(true); return false; } },
       { label: '免费检查', value: 'free', primary: true, action: async () => { await run(false); return false; } }] });
@@ -506,7 +566,7 @@ async function testAccount(a) {
 // ---- device authorization ----
 async function deviceAuth(opts = {}) {
   let flow = null, timer = null;
-  const groups = [...new Set(accountsCache.map((a) => a.group).concat([pool === 'river' ? 'river' : 'default']))].sort();
+  const groups = [...new Set(accountsCache.map((a) => a.group).concat([defaultGroup()]))].sort();
   const step1 = !opts.accountId ? `<div class="form"><label>分组</label><select id="da-group">${groups.map((g) => `<option>${esc(g)}</option>`).join('')}</select>
       <label>出站代理</label><input id="da-proxy" placeholder="可选，签发与后续请求都走它"></div>` : '';
   const target = opts.accountId ? accountsCache.find((a) => a.id === opts.accountId) : null;
@@ -580,10 +640,10 @@ async function loadKeys() {
 $('#btn-new-key').addEventListener('click', async () => {
   let created = null;
   await modal({ title: '新建下游密钥',
-    body: `<div class="form"><label>名称</label><input id="k-name" placeholder="new-api"><label>分组</label><input id="k-group" placeholder="${pool === 'river' ? 'river' : 'default'}" value="${pool === 'river' ? 'river' : 'default'}"><span class="hint">只调度该分组的账号；${pool === 'river' ? 'River' : 'OpenDesign'} 号池的密钥请用本池的分组</span></div><div id="k-out"></div>`,
+    body: `<div class="form"><label>名称</label><input id="k-name" placeholder="new-api"><label>分组</label><input id="k-group" placeholder="${defaultGroup()}" value="${defaultGroup()}"><span class="hint">只调度该分组的账号；这把密钥归 ${POOL_LABEL[pool]} 号池，不会调度其他池的账号</span></div><div id="k-out"></div>`,
     buttons: [{ label: '关闭', value: 'c' }, { label: '创建', value: 'ok', primary: true, action: async () => {
       if (created) return false;
-      created = await api('POST', '/api/client-keys', { name: $('#k-name').value, group: $('#k-group').value });
+      created = await api('POST', '/api/client-keys', { name: $('#k-name').value, group: $('#k-group').value, provider: pool });
       $('#k-out').innerHTML = `<p class="mt"><b>密钥已创建，可随时在列表中复制：</b></p><div class="keybox"><code>${esc(created.key)}</code><button type="button" class="btn small" id="k-copy">复制</button></div>`;
       $('#k-copy').onclick = () => copyText(created.key);
       return false;
@@ -637,10 +697,10 @@ $('#btn-refresh-ilog').addEventListener('click', () => loadImportLog().catch((e)
 $('#btn-new-import-key').addEventListener('click', async () => {
   let created = null;
   await modal({ title: '新建导入密钥',
-    body: `<div class="form"><label>名称</label><input id="ik-name" placeholder="signup-bot"><span class="hint">会写进导入账号的备注，便于追溯来源</span><label>默认分组</label><input id="ik-group" placeholder="${pool === 'river' ? 'river' : 'default'}" value="${pool === 'river' ? 'river' : 'default'}"><span class="hint">请求不带 group 时导入到该分组</span></div><div id="ik-out"></div>`,
+    body: `<div class="form"><label>名称</label><input id="ik-name" placeholder="signup-bot"><span class="hint">会写进导入账号的备注，便于追溯来源</span><label>默认分组</label><input id="ik-group" placeholder="${defaultGroup()}" value="${defaultGroup()}"><span class="hint">请求不带 group、provider 时导入到该分组，并进 ${POOL_LABEL[pool]} 号池</span></div><div id="ik-out"></div>`,
     buttons: [{ label: '关闭', value: 'c' }, { label: '创建', value: 'ok', primary: true, action: async () => {
       if (created) return false;
-      created = await api('POST', '/api/import-keys', { name: $('#ik-name').value, group: $('#ik-group').value });
+      created = await api('POST', '/api/import-keys', { name: $('#ik-name').value, group: $('#ik-group').value, provider: pool });
       $('#ik-out').innerHTML = `<p class="mt"><b>密钥已创建，可随时在列表中复制：</b></p><div class="keybox"><code>${esc(created.key)}</code><button type="button" class="btn small" id="ik-copy">复制</button></div>`;
       $('#ik-copy').onclick = () => copyText(created.key);
       return false;

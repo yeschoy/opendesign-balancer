@@ -40,6 +40,7 @@
     <div class="pool-tabs" id="pool-tabs" role="tablist">
       <button class="pool-tab active" data-pool="opendesign" role="tab">OpenDesign 号池</button>
       <button class="pool-tab" data-pool="river" role="tab">River 号池</button>
+      <button class="pool-tab" data-pool="ollama" role="tab">Ollama 号池</button>
     </div>
     <section id="page-overview" class="page">
       <header class="page-head"><h1>概览</h1><span class="muted" id="ov-updated"></span></header>
@@ -65,7 +66,7 @@
         </div>
       </header>
       <div class="panel flush"><div class="table-wrap"><table class="table" id="acc-table">
-        <thead><tr><th>账号</th><th>状态</th><th>Design Plan 窗口</th><th>钱包 / 套餐模型额度</th><th>并发</th><th>RPM</th><th>健康</th><th>选中/绑定</th><th></th></tr></thead>
+        <thead><tr><th>账号</th><th>状态</th><th data-head="windows">Design Plan 窗口</th><th data-head="wallet">钱包 / 套餐模型额度</th><th>并发</th><th>RPM</th><th>健康</th><th>选中/绑定</th><th></th></tr></thead>
         <tbody></tbody></table></div>
         <p id="acc-empty" class="empty hidden">还没有账号。点「设备授权添加」，在已登录该账号的浏览器里批准即可。</p>
       </div>

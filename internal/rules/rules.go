@@ -155,11 +155,59 @@ func DefaultRiverErrorRules() []ErrorRule {
 	}
 }
 
-func DefaultRetryRules() []RetryRule {
-	return []RetryRule{
-		{ID: "bad-request", Decision: DecisionStop, When: Match{Statuses: []int{400, 404, 413, 422}},
-			Note: "确定性的请求错误，不换号重试（命中冷却/隔离类错误规则的不算请求错误）"},
+// DefaultOllamaErrorRules are Ollama's (docs.ollama.com/api/errors,
+// /api/balance): an opaque API key that is refused (401 "invalid
+// credentials"), a suspended account (403), a 429 whose Retry-After says when
+// to come back, and 500/502/503 for a cloud model that can't be reached. The
+// same API key reads the balance at /api/balance, so a refused balance (401)
+// is the key itself and a zero balance is what /api/balance says, not a guess.
+func DefaultOllamaErrorRules() []ErrorRule {
+	return []ErrorRule{
+		{ID: "ollama-key-invalid", Scope: ScopeAccount, Action: ActionHardQuarantine, DownstreamStatus: 502,
+			When: Match{Statuses: []int{401}},
+			Note: "API Key 无效或已撤销（Go 到 ollama.com/settings/keys 核对），需人工处理（换 key 后点“恢复”）"},
+		{ID: "ollama-account-suspended", Scope: ScopeAccount, Action: ActionHardQuarantine, DownstreamStatus: 503,
+			When: Match{Statuses: []int{403}},
+			Note: "账号被停用或无权限调用该模型：需人工处理"},
+		{ID: "ollama-insufficient-credits", Scope: ScopeAccount, Action: ActionCooldown, RefreshQuota: true, DownstreamStatus: 503,
+			When:  Match{Statuses: []int{402}, BodyContains: []string{"insufficient", "credit", "balance", "quota"}},
+			Reset: &Reset{Fallback: "10m", Max: "6h", Escalate: true},
+			Note:  "额度/余额不足：整号冷却，10 分钟起逐次翻倍，最长 6 小时，成功一次清零；并重新读 /api/balance"},
+		{ID: "ollama-rate-limited", Scope: ScopeAccount, Action: ActionCooldown,
+			When:  Match{Statuses: []int{429}},
+			Reset: &Reset{Header: "Retry-After", Format: "retry-after", Fallback: "30s", Max: "10m"},
+			Note:  "限流：按 Retry-After 冷却后换号"},
+		{ID: "ollama-unavailable", Scope: ScopeAccount, Action: ActionCooldown,
+			When:  Match{Statuses: []int{500, 502, 503, 504}},
+			Reset: &Reset{Header: "Retry-After", Format: "retry-after", Fallback: "20s", Max: "5m"},
+			Note:  "云端模型暂时不可达（502 等）：短冷却后换号"},
 	}
+}
+
+// DefaultRetryRules stops switching on the statuses that mean "this request
+// is wrong", which no account change can fix. Each pool keeps its own list,
+// so one pool can be tuned without touching the others.
+func DefaultRetryRules() []RetryRule {
+	return retryRulesFor("bad-request", "确定性的请求错误，不换号重试（命中冷却/隔离类错误规则的不算请求错误）",
+		400, 404, 413, 422)
+}
+
+// DefaultRiverRetryRules are River's: the same deterministic statuses.
+func DefaultRiverRetryRules() []RetryRule {
+	return retryRulesFor("river-bad-request", "River 认为请求本身有错（参数、模型名、体积），换号也没用",
+		400, 404, 413, 422)
+}
+
+// DefaultOllamaRetryRules are Ollama's: a model that doesn't exist (404), a
+// body above the limit (413) and an unprocessable request (422) are the
+// caller's, not the account's. (docs.ollama.com/api/errors)
+func DefaultOllamaRetryRules() []RetryRule {
+	return retryRulesFor("ollama-bad-request", "Ollama 认为请求本身有错（模型不存在、参数无效、体积超限），换号也没用",
+		400, 404, 413, 422)
+}
+
+func retryRulesFor(id, note string, statuses ...int) []RetryRule {
+	return []RetryRule{{ID: id, Decision: DecisionStop, When: Match{Statuses: statuses}, Note: note}}
 }
 
 func validateMatch(m Match) error {

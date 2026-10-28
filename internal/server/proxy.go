@@ -237,6 +237,30 @@ func riverPath(p string) bool {
 	return false
 }
 
+// ollamaPath: what Ollama serves under /v1 — OpenAI Chat Completions and
+// (stateless) Responses, Anthropic Messages, plus completions and embeddings.
+// Its cloud answers /v1/messages as well as the OpenAI shapes, so all three
+// protocols this proxy speaks pass through unchanged.
+func ollamaPath(p string) bool {
+	for _, base := range []string{"/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/messages", "/v1/embeddings"} {
+		if p == base || strings.HasPrefix(p, base+"/") {
+			return true
+		}
+	}
+	return false
+}
+
+// poolPathOK says whether an account's pool serves the path.
+func poolPathOK(provider, path string) bool {
+	switch provider {
+	case config.ProviderRiver:
+		return riverPath(path)
+	case config.ProviderOllama:
+		return ollamaPath(path)
+	}
+	return true
+}
+
 func writeLocalError(w http.ResponseWriter, proto string, status int, typ, code, msg string, retryAfter int) {
 	if retryAfter > 0 {
 		w.Header().Set("Retry-After", strconv.Itoa(retryAfter))
@@ -336,11 +360,12 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec.ClientKeyID, rec.ClientKeyName, rec.Group = ck.ID, ck.Name, ck.Group
-	rec.Provider = cfg.GroupProvider(ck.Group)
-	if rec.Provider == config.ProviderRiver && !riverPath(r.URL.Path) {
+	rec.Provider = keyPool(cfg, ck)
+	if !poolPathOK(rec.Provider, r.URL.Path) {
 		// River serves only OpenAI Chat Completions and Responses
 		rec.ErrorCategory = "request"
-		writeLocalError(w, proto, http.StatusNotFound, "invalid_request_error", "unsupported_endpoint", "this pool (River) only supports /v1/chat/completions and /v1/responses", 0)
+		writeLocalError(w, proto, http.StatusNotFound, "invalid_request_error", "unsupported_endpoint",
+			"this pool ("+rec.Provider+") does not serve "+r.URL.Path, 0)
 		finish(http.StatusNotFound, "failed")
 		return
 	}
@@ -820,8 +845,21 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, cfg *config.Con
 	}
 	copyRequestHeaders(req.Header, r.Header)
 	req.Header.Set("Authorization", "Bearer "+acct.RuntimeKey)
-	if proto == "anthropic" {
-		req.Header.Set("X-Api-Key", acct.RuntimeKey)
+	switch acct.Provider {
+	case config.ProviderOllama:
+		// ollama.com takes the key in Authorization only: its /v1/messages
+		// explicitly refuses x-api-key on its own, so never send it
+	default:
+		if proto == "anthropic" {
+			req.Header.Set("X-Api-Key", acct.RuntimeKey)
+		}
+	}
+	if acct.Provider == config.ProviderOllama && proto == "anthropic" {
+		// Ollama's Messages endpoint requires the version header; clients
+		// behind a relay sometimes drop it
+		if req.Header.Get("Anthropic-Version") == "" {
+			req.Header.Set("Anthropic-Version", "2023-06-01")
+		}
 	}
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -946,7 +984,12 @@ func errorStatus(m map[string]any, raw []byte) int {
 	switch {
 	case strings.Contains(lower, "insufficient_balance"):
 		return 402
-	case strings.Contains(lower, "model_limit_exceeded"), strings.Contains(lower, "rate_limit"):
+	case strings.Contains(lower, "invalid credentials"), strings.Contains(lower, "unauthorized"):
+		// Ollama answers {"error":"invalid credentials"}
+		return 401
+	case strings.Contains(lower, "account suspended"), strings.Contains(lower, "suspended"):
+		return 403
+	case strings.Contains(lower, "model_limit_exceeded"), strings.Contains(lower, "rate_limit"), strings.Contains(lower, "too many requests"):
 		return 429
 	case strings.Contains(lower, "invalid_api_key"), strings.Contains(lower, "authentication_error"):
 		return 401
@@ -1292,8 +1335,10 @@ func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
 		writeLocalError(w, "openai", http.StatusBadGateway, "api_error", "models_unavailable", "could not list upstream models", 0)
 		return
 	}
+	// An Ollama key's /v1/models is the public cloud catalogue (it answers
+	// 200 even for a refused key), so it can't narrow what this pool serves.
 	allowed, known := map[string]bool{}, false
-	if !cfg.Routing.IgnoreCatalog {
+	if provider := keyPool(cfg, ck); !cfg.Routing.IgnoreCatalog && provider != config.ProviderOllama {
 		now := time.Now()
 		for _, a := range cfg.Accounts {
 			if a.Group != ck.Group || !a.Enabled {

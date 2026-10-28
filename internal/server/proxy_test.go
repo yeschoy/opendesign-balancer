@@ -779,3 +779,226 @@ func TestRulesAreSeparatePerPool(t *testing.T) {
 		t.Fatalf("river rules not defaulted: %v", err)
 	}
 }
+
+// An Ollama pool serves all three protocols this proxy speaks: OpenAI Chat
+// Completions, OpenAI Responses and Anthropic Messages, all under /v1 of the
+// same base, with the key in Authorization only.
+func TestOllamaPoolServesThreeProtocols(t *testing.T) {
+	var mu sync.Mutex
+	seen := map[string]http.Header{}
+	e := newEnv(t, []config.Account{{ID: "o1", Provider: config.ProviderOllama, Group: "ollama", RuntimeKey: "opaque-ollama-key-should-reach-upstream"}}, func(c *config.Config) {
+		c.Upstream.OllamaBase = c.Upstream.RuntimeBase
+		c.ClientKeys = []config.ClientKey{{ID: "ck2", Group: "ollama", KeyHash: config.HashKey("sk-odb-ollama"), KeyPrefix: "x", Enabled: true}}
+	})
+	e.up.handle = func(w http.ResponseWriter, r *http.Request, key string, body map[string]any) {
+		mu.Lock()
+		seen[r.URL.Path] = r.Header.Clone()
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/v1/messages":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprintf(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":7,"output_tokens":2}}`)
+		default:
+			writeOK(w, key)
+		}
+	}
+	e.key = "sk-odb-ollama"
+
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
+		hdr := map[string]string{}
+		if path == "/v1/messages" {
+			hdr["anthropic-version"] = "2023-06-01"
+		}
+		resp := e.post(path, chat(false), hdr)
+		body := readAll(resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d body %s", path, resp.StatusCode, body)
+		}
+		mu.Lock()
+		h := seen[path]
+		mu.Unlock()
+		if h == nil {
+			t.Fatalf("%s never reached the upstream", path)
+		}
+		if got := h.Get("Authorization"); got != "Bearer opaque-ollama-key-should-reach-upstream" {
+			t.Fatalf("%s: Authorization %q", path, got)
+		}
+		// ollama.com refuses x-api-key on its own, so it must not be sent
+		if got := h.Get("X-Api-Key"); got != "" {
+			t.Fatalf("%s: unexpected x-api-key %q", path, got)
+		}
+		if path == "/v1/messages" && h.Get("Anthropic-Version") == "" {
+			t.Fatalf("%s: missing anthropic-version", path)
+		}
+	}
+	// embeddings are served too, but a path Ollama doesn't have is refused locally
+	if resp := e.post("/v1/embeddings", chat(false), nil); resp.StatusCode != http.StatusOK {
+		t.Fatalf("embeddings: status %d", resp.StatusCode)
+	}
+	for _, path := range []string{"/v1/batches", "/v1/fine_tuning/jobs"} {
+		before := e.up.callCount()
+		resp := e.post(path, chat(false), nil)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("%s: status %d, want 404", path, resp.StatusCode)
+		}
+		if e.up.callCount() != before {
+			t.Fatalf("%s reached the upstream", path)
+		}
+	}
+}
+
+// Ollama reports a refused key as {"error":"invalid credentials"}; that has to
+// be read as a 401 so the stock rule quarantines the account instead of
+// cooling it down for five minutes: only the next request differs.
+func TestOllamaRefusedKeyQuarantines(t *testing.T) {
+	e := newEnv(t, []config.Account{
+		{ID: "o1", Provider: config.ProviderOllama, Group: "ollama", RuntimeKey: "dead-ollama-key-aaaaaaaaaaaaaaaa"},
+	}, func(c *config.Config) {
+		c.Upstream.OllamaBase = c.Upstream.RuntimeBase
+		c.ClientKeys = []config.ClientKey{{ID: "ck2", Group: "ollama", KeyHash: config.HashKey("sk-odb-ollama"), KeyPrefix: "x", Enabled: true}}
+	})
+	e.up.handle = func(w http.ResponseWriter, r *http.Request, key string, body map[string]any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"invalid credentials"}`))
+	}
+	e.key = "sk-odb-ollama"
+	resp := e.post("/v1/chat/completions", chat(false), nil)
+	body := readAll(resp)
+	// an account problem never reaches the client as a 401: a relay such as
+	// new-api would disable the whole channel
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status %d body %s", resp.StatusCode, body)
+	}
+	st := e.srv.pool.Views(e.srv.cfg.Get())["o1"].State
+	if st == nil || !st.HardQuarantined || st.RuleID != "ollama-key-invalid" {
+		t.Fatalf("dead key not quarantined: %+v", st)
+	}
+	page, err := e.srv.logs.Query("errors", nil, time.Time{}, time.Time{}, 50, 0)
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("error log: %v %d", err, len(page.Items))
+	}
+	var el map[string]any
+	_ = json.Unmarshal(page.Items[0], &el)
+	if el["ruleId"] != "ollama-key-invalid" || el["provider"] != config.ProviderOllama || el["status"].(float64) != 401 {
+		t.Fatalf("error log = %v", el)
+	}
+	// the quarantined account takes no further requests
+	before := e.up.callCount()
+	resp2 := e.post("/v1/chat/completions", chat(false), nil)
+	resp2.Body.Close()
+	if e.up.callCount() != before {
+		t.Fatal("quarantined account was called again")
+	}
+}
+
+// The Ollama pool's rules are its own: a 402 with a balance message cools the
+// account rather than quarantining it, and a 429 backs off by Retry-After.
+func TestOllamaErrorRules(t *testing.T) {
+	c := config.Default()
+	rs := config.DefaultErrorRulesFor(config.ProviderOllama)
+	h := http.Header{}
+	h.Set("Retry-After", "45")
+	limited := rules.MatchError(rs, 429, `{"error":"rate limit exceeded"}`, h)
+	if limited == nil || limited.ID != "ollama-rate-limited" {
+		t.Fatalf("429 rule = %+v", limited)
+	}
+	if d := rules.Cooldown(limited, h, "", time.Now()); d != 45*time.Second {
+		t.Fatalf("cooldown = %v", d)
+	}
+	if r := rules.MatchError(rs, 401, `{"error":"invalid credentials"}`, http.Header{}); r == nil || r.ID != "ollama-key-invalid" {
+		t.Fatalf("401 rule = %+v", r)
+	}
+	if r := rules.MatchError(rs, 502, `{"error":"cloud model unavailable"}`, http.Header{}); r == nil || r.ID != "ollama-unavailable" {
+		t.Fatalf("502 rule = %+v", r)
+	}
+	// the OpenDesign rules know nothing of these ids
+	od, _ := c.RulesFor(config.ProviderOpenDesign)
+	if r := rules.MatchError(od, 429, `{"error":"rate limit exceeded"}`, h); r != nil && r.ID == "ollama-rate-limited" {
+		t.Fatal("ollama rule leaked into opendesign")
+	}
+}
+
+// A pool is its own pool even before its first account arrives: its key
+// keeps its pool, and its key list and rules stay on it.
+func TestPoolsSeparateBeforeFirstAccount(t *testing.T) {
+	e := newEnv(t, []config.Account{{ID: "d1"}}, func(c *config.Config) {
+		// an Ollama key whose group holds no account yet
+		c.ClientKeys = append(c.ClientKeys, config.ClientKey{ID: "ck-ollama", Name: "ol", Group: "ollama", Provider: config.ProviderOllama,
+			KeyHash: config.HashKey("sk-odb-ollama-only"), KeyPrefix: "x", Enabled: true})
+	})
+	cfg := e.srv.cfg.Get()
+	var key config.ClientKey
+	for _, k := range cfg.ClientKeys {
+		if k.ID == "ck-ollama" {
+			key = k
+		}
+	}
+	if key.Provider != config.ProviderOllama {
+		t.Fatalf("key provider = %q", key.Provider)
+	}
+	// no account holds the group, yet the key and the group stay Ollama's
+	if p := cfg.GroupProvider("ollama"); p != "" {
+		t.Fatalf("group already holds %q", p)
+	}
+	if got := keyPool(cfg, key); got != config.ProviderOllama {
+		t.Fatalf("keyPool = %q", got)
+	}
+	// so its requests are judged, logged and measured as the Ollama pool's
+	rec := &requestLog{}
+	rec.Provider = keyPool(cfg, key)
+	if rec.Provider != config.ProviderOllama {
+		t.Fatalf("logged provider = %q", rec.Provider)
+	}
+	errR, retR := cfg.RulesFor(rec.Provider)
+	if len(errR) == 0 || errR[0].ID != "ollama-key-invalid" || len(retR) == 0 || retR[0].ID != "ollama-bad-request" {
+		t.Fatalf("rules = %v %v", errR, retR)
+	}
+	// and an OpenDesign key stays OpenDesign's, even with no account of its own
+	od := config.ClientKey{ID: "ck-od", Group: "default", Provider: config.ProviderOpenDesign}
+	if got := keyPool(cfg, od); got != config.ProviderOpenDesign {
+		t.Fatalf("opendesign keyPool = %q", got)
+	}
+}
+
+// Saving the settings of one pool rewrites only that pool's rules: the
+// console's "restore defaults" on the Ollama tab must leave the other two
+// pools' rules untouched.
+func TestSettingsSaveScopedToPool(t *testing.T) {
+	s, err := New(t.TempDir(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := s.cfg.Get()
+	odBefore, _ := cfg.RulesFor(config.ProviderOpenDesign)
+	rvBefore, _ := cfg.RulesFor(config.ProviderRiver)
+
+	in := settingsDoc{Revision: cfg.Revision, Upstream: cfg.Upstream, Routing: cfg.Routing, Quota: cfg.Quota, Logs: cfg.Logs,
+		Pricing: cfg.Pricing, ErrorRules: []rules.ErrorRule{{ID: "only-ollama", Scope: rules.ScopeAccount,
+			Action: rules.ActionIgnore, When: rules.Match{Statuses: []int{418}}}},
+		RetryRules: []rules.RetryRule{{ID: "only-ollama-retry", Decision: rules.DecisionStop, When: rules.Match{Statuses: []int{418}}}}}
+	body, _ := json.Marshal(in)
+	req := httptest.NewRequest(http.MethodPut, "/api/settings?provider=ollama", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	s.apiSaveSettings(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("save: %d %s", rec.Code, rec.Body.String())
+	}
+	cfg = s.cfg.Get()
+	if ol, olr := mustRules(t, cfg, config.ProviderOllama); len(ol) != 1 || ol[0].ID != "only-ollama" || len(olr) != 1 || olr[0].ID != "only-ollama-retry" {
+		t.Fatalf("ollama rules = %v %v", ol, olr)
+	}
+	if od, _ := cfg.RulesFor(config.ProviderOpenDesign); len(od) != len(odBefore) || od[0].ID != odBefore[0].ID {
+		t.Fatalf("opendesign rules changed: %v", od)
+	}
+	if rv, _ := cfg.RulesFor(config.ProviderRiver); len(rv) != len(rvBefore) || rv[0].ID != rvBefore[0].ID {
+		t.Fatalf("river rules changed: %v", rv)
+	}
+}
+
+func mustRules(t *testing.T, c *config.Config, p string) ([]rules.ErrorRule, []rules.RetryRule) {
+	t.Helper()
+	e, r := c.RulesFor(p)
+	return e, r
+}

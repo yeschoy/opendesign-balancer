@@ -380,3 +380,47 @@ func TestPackageClassCooldownKeepsPlanModels(t *testing.T) {
 		t.Fatalf("want retry-after ~1h, got %v", err)
 	}
 }
+
+// An Ollama account whose balance read nothing is left is not scheduled,
+// while an OpenDesign account of another group is untouched, and a stale or
+// failed balance read never excludes anything.
+func TestOllamaExhaustedByBalance(t *testing.T) {
+	cfg := config.Default()
+	cfg.Accounts = []config.Account{
+		{ID: "o1", Provider: config.ProviderOllama, RuntimeKey: "opaque-key", Group: "ollama", Enabled: true},
+	}
+	if err := cfg.Normalize(); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	empty := quota.OllamaBalance{IncludedUSD: "0", AllowanceUSD: "100", PurchasedUSD: "0", PeriodUntil: now.Add(48 * time.Hour)}
+	full := quota.OllamaBalance{IncludedUSD: "80", AllowanceUSD: "100", PurchasedUSD: "0", PeriodUntil: now.Add(48 * time.Hour)}
+
+	var snap *quota.Snapshot
+	p := New(func(string) *quota.Snapshot { return snap })
+	if _, err := p.Acquire(context.Background(), cfg, Request{Group: "ollama", RequestID: "r1"}); err != nil {
+		t.Fatalf("unknown balance must not exclude the account: %v", err)
+	}
+
+	snap = &quota.Snapshot{Ollama: &empty, BalanceAt: now}
+	_, err := p.Acquire(context.Background(), cfg, Request{Group: "ollama", RequestID: "r2"})
+	var ue *UnavailableError
+	if !errors.As(err, &ue) || ue.Details["quota-exhausted"] != 1 {
+		t.Fatalf("empty balance = %v", err)
+	}
+
+	snap = &quota.Snapshot{Ollama: &full, BalanceAt: now}
+	if l, err := p.Acquire(context.Background(), cfg, Request{Group: "ollama", RequestID: "r3"}); err != nil {
+		t.Fatalf("funded account was refused: %v", err)
+	} else {
+		l.Release()
+	}
+
+	// stale, or a failed read: no positive evidence, so no exclusion
+	snap = &quota.Snapshot{Ollama: &empty, BalanceAt: now.Add(-48 * time.Hour)}
+	if l, err := p.Acquire(context.Background(), cfg, Request{Group: "ollama", RequestID: "r4"}); err == nil {
+		l.Release()
+	} else {
+		t.Fatalf("stale balance excluded the account: %v", err)
+	}
+}

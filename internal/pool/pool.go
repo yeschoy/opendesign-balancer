@@ -384,6 +384,13 @@ func (p *Pool) unavailableLocked(cfg *config.Config, a config.Account, model str
 	if !cfg.Routing.IgnoreCatalog && snap.NotEntitled(model, now) {
 		return "not-entitled" // not on this account's plan
 	}
+	if a.Provider == config.ProviderOllama {
+		// Ollama credits: the included allowance, then purchased credits
+		if _, exhausted := snap.OllamaFunding(now, stale); exhausted {
+			return "quota-exhausted"
+		}
+		return ""
+	}
 	if snap.Fresh(now, stale) {
 		if _, exhausted := snap.FundingFor(now, stale, model, cfg.Routing.WalletFallback); exhausted {
 			return "quota-exhausted"
@@ -581,7 +588,24 @@ func (p *Pool) seatLocked(cfg *config.Config, a config.Account, model string, no
 		s.Count, s.LastSelected = c.Count, c.LastSelected
 	}
 	stale := time.Duration(cfg.Quota.StaleSec) * time.Second
-	if snap := p.quota(a.ID); snap.Fresh(now, stale) {
+	snap := p.quota(a.ID)
+	if a.Provider == config.ProviderOllama {
+		// the balance is the pace signal: included allowance first, purchased
+		// credits only fill in behind it
+		if snap.FreshOllama(now, stale) {
+			s.Known = true
+			switch src, _ := snap.OllamaFunding(now, stale); src {
+			case "included":
+				s.Used, s.Soon = snap.OllamaUsedShare(now), snap.OllamaRenewals(now)
+			case "purchased":
+				s.Fallback, s.Used = 2, 100
+			default:
+				s.Known = false
+			}
+		}
+		return s
+	}
+	if snap.Fresh(now, stale) {
 		s.Known = true
 		switch src, _ := snap.FundingFor(now, stale, model, cfg.Routing.WalletFallback); src {
 		case "plan":

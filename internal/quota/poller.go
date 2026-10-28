@@ -47,6 +47,12 @@ type Snapshot struct {
 	CatalogAt    time.Time       `json:"catalogAt,omitzero"`
 	CatalogError string          `json:"catalogError,omitempty"`
 
+	// Ollama is the last GET /api/balance of an Ollama account: its API key
+	// reads its own balance, there being no control key. Only a read younger
+	// than the stale window is trusted.
+	Ollama    *OllamaBalance `json:"ollama,omitempty"`
+	BalanceAt time.Time      `json:"balanceAt,omitzero"`
+
 	AuthFailed  bool      `json:"authFailed"`
 	LastError   string    `json:"lastError,omitempty"`
 	LastErrorAt time.Time `json:"lastErrorAt,omitzero"`
@@ -80,9 +86,12 @@ var DefaultDesignPlanModels = map[string]bool{
 
 // NotEntitled: there is evidence the account's plan can't call model —
 // its catalogue lacks it or marks it disabled, or it is a 套餐模型 on Go,
-// which has no 套餐模型 at all.
+// which has no 套餐模型 at all. An Ollama account has no plan gate here: the
+// cloud's /v1/models is the public catalogue every key sees, so it says
+// nothing about one key's entitlement, and a self-hosted server's list only
+// changes when models are pulled.
 func (s *Snapshot) NotEntitled(model string, now time.Time) bool {
-	if s == nil || model == "" {
+	if s == nil || model == "" || s.Ollama != nil {
 		return false
 	}
 	if len(s.Catalog) > 0 && now.Sub(s.CatalogAt) < catalogStale {
@@ -137,6 +146,10 @@ func (s *Snapshot) clone() *Snapshot {
 	if s.ModelCovered != nil {
 		v := *s.ModelCovered
 		c.ModelCovered = &v
+	}
+	if s.Ollama != nil {
+		ob := *s.Ollama
+		c.Ollama = &ob
 	}
 	return &c
 }
@@ -224,6 +237,79 @@ func (s *Snapshot) PaidPositive() bool {
 		return true
 	}
 	return s.Summary != nil && (positiveCredits(s.Summary.RechargeCredits) || positiveCredits(s.Summary.RechargeCreditsUSD))
+}
+
+// FreshOllama is the Ollama balance read within stale.
+func (s *Snapshot) FreshOllama(now time.Time, stale time.Duration) bool {
+	return s != nil && s.Ollama != nil && !s.AuthFailed && !s.BalanceAt.IsZero() && now.Sub(s.BalanceAt) < stale
+}
+
+// OllamaFunding says what pays for an Ollama account now: the included
+// allowance first (its period's remaining credits, or the legacy session and
+// weekly percentages), then purchased credits. source is included |
+// purchased | unknown; exhausted is true only with positive evidence that
+// both are empty, and never from a stale or failed read.
+func (s *Snapshot) OllamaFunding(now time.Time, stale time.Duration) (source string, exhausted bool) {
+	if !s.FreshOllama(now, stale) {
+		return "unknown", false
+	}
+	b := s.Ollama
+	// a period that has run out is a fresh allowance, not an old one
+	if b.IncludedUSD != "" {
+		if !b.PeriodUntil.IsZero() && !now.Before(b.PeriodUntil) {
+			return "included", false
+		}
+		if positiveCredits(b.IncludedUSD) {
+			return "included", false
+		}
+	}
+	if b.SessionPercent != nil && (b.SessionResetsAt.IsZero() || now.Before(b.SessionResetsAt)) && *b.SessionPercent > 0 {
+		return "included", false
+	}
+	if b.WeeklyPercent != nil && (b.WeeklyResetsAt.IsZero() || now.Before(b.WeeklyResetsAt)) && *b.WeeklyPercent > 0 {
+		return "included", false
+	}
+	if positiveCredits(b.PurchasedUSD) {
+		return "purchased", false
+	}
+	return "", true
+}
+
+// OllamaUsedShare is the share (0–100) of the fullest Ollama limit used: the
+// included allowance, or the legacy session/weekly percentage spent.
+func (s *Snapshot) OllamaUsedShare(now time.Time) float64 {
+	b := s.Ollama
+	if b == nil {
+		return 0
+	}
+	share := 0.0
+	if left, ok := ParseUSD(b.IncludedUSD); ok {
+		if all, ok2 := ParseUSD(b.AllowanceUSD); ok2 && all > 0 {
+			share = max(share, min(max((all-left)/all*100, 0), 100))
+		}
+	}
+	if b.SessionPercent != nil {
+		share = max(share, float64(100-*b.SessionPercent))
+	}
+	if b.WeeklyPercent != nil {
+		share = max(share, float64(100-*b.WeeklyPercent))
+	}
+	return share
+}
+
+// OllamaRenewals are when an Ollama account's limits reset, the latest first.
+func (s *Snapshot) OllamaRenewals(now time.Time) []time.Time {
+	b := s.Ollama
+	if b == nil {
+		return nil
+	}
+	var out []time.Time
+	for _, t := range []time.Time{b.PeriodUntil, b.WeeklyResetsAt, b.SessionResetsAt} {
+		if t.After(now) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // FundingFor says what would pay for model now, in the official order: Design
@@ -483,11 +569,12 @@ func (p *Poller) dispatch(ctx context.Context) {
 // RefreshNow reads one account synchronously (admin button).
 func (p *Poller) RefreshNow(ctx context.Context, a config.Account) error {
 	if a.ControlKey == "" {
-		// only the catalogue can be read
+		// only the catalogue (and, for Ollama, the balance) can be read
 		p.mu.Lock()
 		if s := p.snaps[a.ID]; s != nil {
 			c := *s
 			c.CatalogAt = time.Time{}
+			c.BalanceAt = time.Time{}
 			p.snaps[a.ID] = &c
 		}
 		p.mu.Unlock()
@@ -504,6 +591,9 @@ func backoff(failures int) time.Duration {
 }
 
 func (p *Poller) fetch(ctx context.Context, cfg *config.Config, a config.Account) error {
+	if a.Provider == config.ProviderOllama {
+		return p.fetchOllama(ctx, cfg, a)
+	}
 	client := &Client{Base: cfg.Upstream.ControlBase, HTTP: p.HTTPFor(a.ProxyURL)}
 	p.mu.Lock()
 	prev := p.snaps[a.ID].clone()
@@ -600,8 +690,56 @@ func (p *Poller) fetch(ctx context.Context, cfg *config.Config, a config.Account
 	return nil
 }
 
-func (p *Poller) store(id string, s *Snapshot) {
-	// an account deleted while it was read is not brought back
+// ollamaBalanceEvery is the shortest gap between two balance reads of the
+// same Ollama account: /api/balance allows 10 requests a minute per user,
+// shared by every key that user has, so the reads stay well under that even
+// with several accounts and a short quota interval.
+const ollamaBalanceEvery = 30 * time.Second
+
+// fetchOllama reads an Ollama account's balance (and, less often, its model
+// list). The API key is both the inference key and the balance key, so there
+// is no control key and a refused balance means the key itself is dead.
+func (p *Poller) fetchOllama(ctx context.Context, cfg *config.Config, a config.Account) error {
+	client := &Client{Base: cfg.ControlBase(a), HTTP: p.HTTPFor(a.ProxyURL)}
+	p.mu.Lock()
+	prev := p.snaps[a.ID].clone()
+	p.mu.Unlock()
+	s := prev
+	if s == nil {
+		s = &Snapshot{}
+	}
+	now := time.Now()
+	fail := func(err error) error {
+		s.LastError, s.LastErrorAt = err.Error(), now
+		s.AuthFailed = IsAuth(err)
+		s.Failures++
+		s.NextAt = now.Add(backoff(s.Failures))
+		p.store(a.ID, s)
+		return err
+	}
+
+	if a.RuntimeKey != "" && now.Sub(s.CatalogAt) >= catalogTTL {
+		if cat, err := FetchCatalog(ctx, p.HTTPFor(a.ProxyURL), cfg.RuntimeBase(a), a.RuntimeKey); err == nil {
+			s.Catalog, s.CatalogAt, s.CatalogError = cat, now, ""
+		} else {
+			s.CatalogError = err.Error() // the last good catalogue stays
+		}
+	}
+
+	b, err := client.Balance(ctx, cfg.ControlBase(a), a.RuntimeKey)
+	if err != nil {
+		return fail(err)
+	}
+	s.Ollama, s.BalanceAt = &b, now
+	s.AuthFailed = false
+	s.LastOKAt, s.Failures, s.LastError = now, 0, ""
+	interval := max(time.Duration(cfg.Quota.IntervalSec)*time.Second, ollamaBalanceEvery)
+	s.NextAt = now.Add(interval)
+	p.store(a.ID, s)
+	return nil
+}
+
+func (p *Poller) store(id string, s *Snapshot) { // an account deleted while it was read is not brought back
 	if _, ok := p.Cfg().Account(id); !ok {
 		return
 	}

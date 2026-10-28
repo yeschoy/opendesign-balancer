@@ -1,6 +1,6 @@
 # opendesign-balancer
 
-OpenDesign 账号池代理。对下游（new-api 等中转站）提供一把 API 密钥和 OpenAI / Anthropic 兼容接口，把请求分发到一组 OpenDesign 账号上，负责选号、会话粘性、并发与 RPM 控制、额度轮询、错误处理和日志，并带一个 Web 管理台。
+OpenDesign 账号池代理。对下游（new-api 等中转站）提供一把 API 密钥和 OpenAI / Anthropic 兼容接口，把请求分发到一组上游账号上，负责选号、会话粘性、并发与 RPM 控制、额度轮询、错误处理和日志，并带一个 Web 管理台。除 OpenDesign 外，也支持 [River](https://docs.river.ai/) 与 [Ollama](https://docs.ollama.com/)（云端或自建）三个号池，各自独立分组、独立密钥、独立错误规则。
 
 单个 Go 二进制，无外部依赖，无数据库。
 
@@ -46,12 +46,34 @@ docker compose up -d --build
 
 除 OpenDesign 外也支持 [River](https://docs.river.ai/) 的 API Key（`rv_` 开头）。上游 `https://api.river.ai/v1`（设置 `upstream.riverBase` 可改），OpenAI 兼容，`Authorization: Bearer rv_…`。
 
-- 账号的 `provider` 由运行密钥前缀自动决定：`rv_` → `river`，`sk-` → `opendesign`；手动添加、批量导入、开放导入接口都认 `rv_`。River 没有控制面，不能填控制密钥。
+- 账号的 `provider` 由运行密钥前缀自动决定：`rv_` → `river`，`oll-` → `ollama`，`sk-` → `opendesign`；手动添加、批量导入、开放导入接口都认 `rv_`。River 没有控制面，不能填控制密钥。
 - **River 只支持 OpenAI Chat Completions 和 Responses**（`/v1/chat/completions`、`/v1/responses`、`/v1/models`）。River 号池收到 `/v1/messages`（Anthropic）等其他路径时，本地直接返回 404 `unsupported_endpoint`，不请求上游；Claude Code 这类 Anthropic 客户端不能接 River 池。
 - 额度未知，靠错误推断：River 的 402（余额不足）按“余额不足”规则逐次翻倍冷却，429 按 `Retry-After` 冷却，401 冷却后换号。**已有实例需在“路由设置”点“恢复默认规则”再保存**才有新增的 401/402 规则。
 - 每把 key 的 `/v1/models` 作为可用模型表，River 模型名形如 `deepseek-ai/DeepSeek-V4.1-Flash`。
-- **两个号池完全分开**：River 账号不指定分组时进 `river` 组，OpenDesign 账号进 `default` 组；一个分组只能放同一种账号，混放会被拒绝保存。各池各建下游密钥（「下游密钥」页，分组分别填 `default` 和 `river`），密钥只调度本组账号，互不借号，用哪个池就给下游配哪把密钥（new-api 里建两个渠道）。导入密钥的默认分组为 `default` 时，`rv_` 账号自动进 `river`。
+- **号池之间完全分开**：River 账号不指定分组时进 `river` 组、Ollama 账号进 `ollama` 组，OpenDesign 账号进 `default` 组；一个分组只能放同一种账号，混放会被拒绝保存。各池各建下游密钥（「下游密钥」页，分组分别填 `default` 和 `river`），密钥只调度本组账号，互不借号，用哪个池就给下游配哪把密钥（new-api 里建两个渠道）。导入密钥的默认分组为 `default` 时，`rv_` 账号自动进 `river`。
 - River 文档没有公布每 key 的并发/RPM 上限，需要时在账号上手设 `maxConcurrent` / `maxRpm`。
+
+## Ollama 号池（ollama.com / 自建 ollama serve）
+
+支持 [Ollama](https://docs.ollama.com/) 的 API Key：云端 `https://ollama.com/v1`（设置 `upstream.ollamaBase` 可改），或自建服务 `http://host:11434/v1`。**三协议都能接**，不用协议转换：
+
+| 客户端协议 | 路径 | 说明 |
+|---|---|---|
+| OpenAI Chat Completions | `/v1/chat/completions`（另含 `/v1/completions`、`/v1/embeddings`） | 原样转发 |
+| OpenAI Responses | `/v1/responses` | 原样转发；Ollama 云端只支持**无状态**版本（没有 `previous_response_id` / `conversation`） |
+| Anthropic Messages | `/v1/messages` | 原样转发，Claude Code 可直接接 |
+
+- **Key 没有固定前缀**，所以账号要显式声明号池：管理台在「Ollama 号池」标签下添加 / 批量导入（自动带 `provider=ollama`），开放导入接口传 `"provider":"ollama"`；也可以把 key 写成 `oll-` 开头让它被自动识别。账号的 `provider` 字段在 config.json 里落盘。
+- **鉴权只走 `Authorization: Bearer`**：ollama.com 的 `/v1/messages` 明确不接受单独的 `x-api-key`，所以本服务对 Ollama 账号不发 `x-api-key`（OpenDesign 账号仍然两个都发）。客户端漏传 `anthropic-version` 时，代理会补 `2023-06-01`。
+- **额度有接口**：Ollama 的同一把 key 就能读 `GET /api/balance`（不需要控制密钥），返回赠送额度（`included.balance_usd` / `allowance_usd` 与计费周期）、老套餐的 `session` / `weekly` 剩余百分比，以及已购额度 `purchased.balance_usd`。本服务把这些分开展示，额度耗尽判定为「赠送额度用完且已购额度为 0」——读失败或数据过期时绝不当作 0。该接口每个用户每分钟限 10 次，所以同一账号两次读取至少间隔 30 秒。
+- 冷却规则独立一套（`ollamaErrorRules`）：401 `invalid credentials` 隔离换 key，403 账号停用隔离，429 按 `Retry-After` 冷却，500/502/503/504 短暂冷却换号。已有实例需在「路由设置 → Ollama 号池」点「恢复默认规则」再保存。
+- `/v1/models` 原样透传：Ollama 云端的模型目录对所有 key 相同（换个错误 key 也返回 200），不能当套餐依据，所以不做按账号裁剪；自建服务的列表则是本机已 pull 的模型。
+- 分组：不指定分组时进 `ollama` 组，各池之间不混放。下游密钥填 `ollama` 分组（new-api 里再建一个 OpenAI/Claude 渠道指向本服务）。
+- **三个池在三件事上完全独立**，互不借、互不回退：
+  - **号池**：`default` / `river` / `ollama` 三个分组各属一个池，一个分组只放同一种账号。自定义分组跟着第一把声明了池的密钥走，归属一旦确定就不能再改。
+  - **下游密钥**：密钥自己记着 `provider`，所以池里还没有账号时它也不会漂到别的标签下；密钥只能在**自己池的分组**之间移动，想换池请新建密钥（`group "river" 属于 river 号池，这把密钥属于 ollama 号池` 这样的报错就是被拦下了）。
+  - **错误规则**：`errorRules` / `retryRules`、`riverErrorRules` / `riverRetryRules`、`ollamaErrorRules` / `ollamaRetryRules` 三套独立，设置页只读写当前标签的一套；三套默认值也各不相同（重试规则 id 分别是 `bad-request`、`river-bad-request`、`ollama-bad-request`）。改一个池的规则不会动到另外两个池。
+- 模型名带 tag，形如 `gpt-oss:20b`、`gemma4:31b`、`kimi-k2.7-code`；价格表按同样写法配置才会算费用。
 
 ## 下游接口
 
@@ -68,12 +90,20 @@ docker compose up -d --build
 
 ### 开放导入接口（自动上号）
 
-给注册脚本或其他账号池用的接口，让新账号不经管理台直接入池。它用单独的一类密钥鉴权：在 **下游密钥 → 导入密钥 → 新建** 得到 `sk-odbimp-…`（只显示一次）。导入密钥只能导入账号，不能调用模型；下游密钥和管理员会话都不能导入。
+给注册脚本或其他账号池用的接口。接入说明见 [docs/import-api.md](docs/import-api.md)。在 **下游密钥 → 导入密钥 → 新建** 得到 `sk-odbimp-…`。导入密钥只能导入账号，不能调用模型；下游密钥和管理员会话都不能导入。
 
 ```sh
-curl -X POST http://host:8790/open/v1/accounts/import \
+curl -X POST https://ods.yeschoy.io/open/v1/accounts/import \
   -H 'Authorization: Bearer sk-odbimp-…' -H 'Content-Type: application/json' \
   -d '{"runtimeKey":"sk-amr-…","controlKey":"vela_ctrl_…","name":"账号A","group":"可选","note":"可选"}'
+```
+
+Ollama 号池的 key 没有固定前缀，导入时显式声明号池（`provider` 省略时由 key 前缀决定）：
+
+```sh
+curl -X POST https://ods.yeschoy.io/open/v1/accounts/import \
+  -H 'Authorization: Bearer sk-odbimp-…' -H 'Content-Type: application/json' \
+  -d '{"runtimeKey":"<ollama API key>","provider":"ollama","name":"ollama-1"}'
 ```
 
 - 也可以用 `X-Import-Key` 头；批量用 `{"accounts":[…]}`，每次最多 200 个；`runtimeKey` 必填（也接受 `apiKey`/`key` 字段名），`controlKey`、`name`、`group`、`note`、`proxyUrl` 可选。不填 `group` 时用导入密钥的默认分组。
@@ -192,6 +222,8 @@ new-api 打开“透传请求头”后，本服务按以下顺序识别会话，
 - 只有拿得出证据时才把账号排除：该模型能用的窗口没有余量，且账单摘要（新鲜的）显示套餐模型额度为 0，且钱包和充值额度为 0（或关闭了 `walletFallback`）。官方规范明确说“钱包为 0 不能证明请求无法开始”，摘要读不到时不排除，交给真实的 `insufficient_balance` 错误处理。
 
 概览页的窗口剩余按工作区去重求和，多个账号属于同一工作区时只算一次，账号列表里会标“共享工作区”。
+
+上面这些只适用于 OpenDesign 号池。**River 没有额度接口**，只能靠 402/429 推断；**Ollama 有 `/api/balance`**：同一把 key 读自己的赠送额度（`included.balance_usd` / `allowance_usd` 与周期）、老套餐的 `session` / `weekly` 剩余百分比和已购额度 `purchased.balance_usd`，三项分开显示、不相加。判定“额度耗尽”的依据是赠送额度为 0（或周期已过）且已购额度为 0——读失败或超过 15 分钟未更新的快照一律按“未知”处理，不会排除账号。该接口每个用户每分钟限 10 次，同一账号两次读取至少间隔 30 秒。
 
 ### 只有 API Key 的账号
 

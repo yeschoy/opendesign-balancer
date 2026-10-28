@@ -28,12 +28,22 @@ const (
 	DefaultGroup = "default"
 	// RiverGroup is where River accounts land when no group is named.
 	RiverGroup = "river"
+	// OllamaGroup is where Ollama accounts land when no group is named.
+	OllamaGroup = "ollama"
 )
 
 // DefaultGroupFor is the group an account of key's provider joins by default.
 func DefaultGroupFor(key string) string {
-	if ProviderForKey(key) == ProviderRiver {
+	return GroupForProvider(ProviderForKey(key))
+}
+
+// GroupForProvider is the default group of a provider's pool.
+func GroupForProvider(provider string) string {
+	switch provider {
+	case ProviderRiver:
 		return RiverGroup
+	case ProviderOllama:
+		return OllamaGroup
 	}
 	return DefaultGroup
 }
@@ -50,33 +60,136 @@ type Upstream struct {
 	// RiverBase is the OpenAI-compatible endpoint of River (docs.river.ai)
 	// that accounts with Provider "river" are sent to.
 	RiverBase string `json:"riverBase"`
+	// OllamaBase is where accounts with Provider "ollama" send inference.
+	// https://ollama.com/v1 serves OpenAI Chat Completions, OpenAI Responses
+	// (stateless only) and Anthropic Messages (/v1/messages); a self-hosted
+	// server answers at http://host:11434/v1 with the same three paths.
+	OllamaBase string `json:"ollamaBase"`
 }
 
 const (
 	ProviderOpenDesign = "opendesign"
 	ProviderRiver      = "river"
+	ProviderOllama     = "ollama"
 	RiverKeyPrefix     = "rv_"
+	// OllamaKeyPrefix is the prefix the console/import accept for an Ollama
+	// key. ollama.com's own keys carry no documented prefix, so an account
+	// may also be declared provider "ollama" and keep the key verbatim.
+	OllamaKeyPrefix = "oll-"
 )
 
-// ProviderForKey infers the provider from a runtime key's prefix.
+// Providers are the pools Validate accepts.
+var Providers = []string{ProviderOpenDesign, ProviderRiver, ProviderOllama}
+
+// ProviderForKey infers the provider from a runtime key's prefix. It returns
+// "" for a key whose prefix identifies no provider (an ollama.com API key or a
+// key of a self-hosted Ollama): such an account must name its provider.
 func ProviderForKey(key string) string {
-	if strings.HasPrefix(key, RiverKeyPrefix) {
+	switch {
+	case strings.HasPrefix(key, RiverKeyPrefix):
 		return ProviderRiver
+	case strings.HasPrefix(key, OllamaKeyPrefix):
+		return ProviderOllama
+	case strings.HasPrefix(key, "sk-"):
+		return ProviderOpenDesign
 	}
-	return ProviderOpenDesign
+	return ""
 }
 
-// ValidRuntimeKey reports whether key looks like a runtime key of some provider.
+// ValidRuntimeKey reports whether key can be a runtime key of some provider.
+// An Ollama key has no documented shape: ollama.com issues opaque strings and
+// a self-hosted server ignores the value ("ollama"), so any token without
+// whitespace is accepted for that provider.
 func ValidRuntimeKey(key string) bool {
-	return strings.HasPrefix(key, "sk-") || strings.HasPrefix(key, RiverKeyPrefix)
+	return ValidRuntimeKeyFor(ProviderForKey(key), key)
+}
+
+// ValidRuntimeKeyFor reports whether key may be provider's runtime key.
+func ValidRuntimeKeyFor(provider, key string) bool {
+	if key == "" || len(key) > 512 || strings.TrimSpace(key) != key {
+		return false
+	}
+	switch provider {
+	case ProviderRiver:
+		return strings.HasPrefix(key, RiverKeyPrefix)
+	case ProviderOllama:
+		return !strings.ContainsAny(key, " \t\r\n")
+	default:
+		return strings.HasPrefix(key, "sk-")
+	}
+}
+
+// KnownProvider reports whether p names a pool.
+func KnownProvider(p string) bool {
+	for _, x := range Providers {
+		if x == p {
+			return true
+		}
+	}
+	return false
+}
+
+// ResolveProvider settles an account's provider from its declared provider and
+// its key. A key prefix that names a provider always wins, so a swapped key
+// can't leave a stale provider behind; a key no prefix identifies (an
+// ollama.com API key, a self-hosted server's placeholder) keeps the declared
+// provider, and OpenDesign when that is empty (a config from before the other
+// pools had keys without a prefix).
+func ResolveProvider(declared, key string) string {
+	switch inferred := ProviderForKey(key); inferred {
+	case ProviderOpenDesign, ProviderRiver, ProviderOllama:
+		return inferred
+	}
+	if declared == "" {
+		return ProviderOpenDesign
+	}
+	return declared
+}
+
+// runtimeKeyError is the hint for a key its declared provider can't accept.
+func runtimeKeyError(provider string) string {
+	switch provider {
+	case ProviderRiver:
+		return "runtime key must start with rv_"
+	case ProviderOllama:
+		return "runtime key must not contain whitespace"
+	default:
+		return "runtime key must start with sk-amr- (or rv_ for River, oll- for Ollama)"
+	}
 }
 
 // RulesFor are the error and retry rules of an account's pool.
 func (c *Config) RulesFor(provider string) ([]rules.ErrorRule, []rules.RetryRule) {
-	if provider == ProviderRiver {
+	switch provider {
+	case ProviderRiver:
 		return c.RiverErrorRules, c.RiverRetryRules
+	case ProviderOllama:
+		return c.OllamaErrorRules, c.OllamaRetryRules
 	}
 	return c.ErrorRules, c.RetryRules
+}
+
+// DefaultErrorRulesFor is a pool's stock error rules (the console's
+// "restore defaults").
+func DefaultErrorRulesFor(provider string) []rules.ErrorRule {
+	switch provider {
+	case ProviderRiver:
+		return rules.DefaultRiverErrorRules()
+	case ProviderOllama:
+		return rules.DefaultOllamaErrorRules()
+	}
+	return rules.DefaultErrorRules()
+}
+
+// DefaultRetryRulesFor is a pool's stock retry rules.
+func DefaultRetryRulesFor(provider string) []rules.RetryRule {
+	switch provider {
+	case ProviderRiver:
+		return rules.DefaultRiverRetryRules()
+	case ProviderOllama:
+		return rules.DefaultOllamaRetryRules()
+	}
+	return rules.DefaultRetryRules()
 }
 
 // GroupProvider is the provider whose accounts group holds ("" when it has
@@ -90,12 +203,105 @@ func (c *Config) GroupProvider(group string) string {
 	return ""
 }
 
+// GroupPool is the pool a group belongs to, for keys, import keys and logs:
+// an account of it decides; a group that still holds no account is read off
+// its keys, then off its name (so `ollama` is Ollama's pool before the first
+// account arrives). "" means no pool could be told.
+func (c *Config) GroupPool(group string) string {
+	if p := c.GroupProvider(group); p != "" {
+		return p
+	}
+	// the stock group names come first: a key must not be able to redefine a
+	// pool's own group by declaring itself another pool's
+	for _, p := range Providers {
+		if GroupForProvider(p) == group {
+			return p
+		}
+	}
+	for _, k := range c.ClientKeys {
+		if k.Group == group && k.Provider != "" {
+			return k.Provider
+		}
+	}
+	for _, k := range c.ImportKeys {
+		if k.Group == group && k.Provider != "" {
+			return k.Provider
+		}
+	}
+	return ""
+}
+
+// keyProvider settles a key's pool: the pool its group already belongs to
+// decides, otherwise the value the key carries, otherwise the group's name,
+// and OpenDesign last. A declared provider that contradicts the group is
+// refused by keyProviderErr rather than quietly rewritten, so a key can never
+// be moved into another pool by a typo.
+func (c *Config) keyProvider(declared, group string) (string, error) {
+	if declared != "" && !KnownProvider(declared) {
+		return "", fmt.Errorf("provider must be opendesign, river or ollama")
+	}
+	// a group an account already holds is that pool's, full stop
+	if pool := c.GroupProvider(group); pool != "" {
+		if declared != "" && declared != pool {
+			return "", fmt.Errorf("group %q holds %s accounts, so it belongs to the %s pool, not %s", group, pool, pool, declared)
+		}
+		return pool, nil
+	}
+	// no account yet: the group's name, else the key's own pool
+	if pool := c.GroupPool(group); pool != "" {
+		if declared != "" && declared != pool {
+			return "", fmt.Errorf("group %q is the %s pool's, but the key declares %s", group, pool, declared)
+		}
+		return pool, nil
+	}
+	if declared != "" {
+		return declared, nil
+	}
+	return ProviderOpenDesign, nil
+}
+
 // RuntimeBase is the inference endpoint account a is served from.
 func (c *Config) RuntimeBase(a Account) string {
-	if a.Provider == ProviderRiver {
+	switch a.Provider {
+	case ProviderRiver:
 		return c.Upstream.RiverBase
+	case ProviderOllama:
+		return c.Upstream.OllamaBase
 	}
 	return c.Upstream.RuntimeBase
+}
+
+// ControlBase is where an account's quota is read. Only OpenDesign has a
+// separate control plane behind a vela_ctrl_ key; Ollama reports balances at
+// /api/balance for the same API key, on the host of its inference base
+// (https://ollama.com/v1 → https://ollama.com/api/balance), and River reports
+// nothing.
+func (c *Config) ControlBase(a Account) string {
+	if a.Provider == ProviderOllama {
+		return OllamaAPIRoot(c.Upstream.OllamaBase)
+	}
+	return c.Upstream.ControlBase
+}
+
+// OllamaAPIRoot turns an Ollama inference base into the root the native /api
+// endpoints hang off: https://ollama.com/v1 → https://ollama.com.
+func OllamaAPIRoot(base string) string {
+	base = strings.TrimRight(base, "/")
+	for _, suffix := range []string{"/v1", "/api"} {
+		if strings.HasSuffix(base, suffix) {
+			return strings.TrimSuffix(base, suffix)
+		}
+	}
+	return base
+}
+
+// BalancePath is the path of the balance read on ControlBase ("" when the
+// provider has none).
+func BalancePath(provider string) string {
+	if provider == ProviderOllama {
+		return "/api/balance"
+	}
+	return ""
 }
 
 type Admin struct {
@@ -104,9 +310,13 @@ type Admin struct {
 }
 
 type ClientKey struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Group     string    `json:"group"`
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Group string `json:"group"`
+	// Provider is the pool this key belongs to. It follows its group's pool
+	// when empty, and an account of the group always decides over it, so a
+	// stale value can't route a key into another pool.
+	Provider  string    `json:"provider,omitempty"`
 	KeyHash   string    `json:"keyHash"`
 	KeyPrefix string    `json:"keyPrefix"`
 	Key       string    `json:"key,omitempty"` // plaintext so the admin can copy it again; empty for keys created before this field existed
@@ -117,9 +327,12 @@ type ClientKey struct {
 // ImportKey authorizes the open account-import endpoint
 // (POST /open/v1/accounts/import). It is stored hashed like a ClientKey.
 type ImportKey struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	Group     string    `json:"group"` // the group imported accounts join when the request names none
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Group string `json:"group"` // the group imported accounts join when the request names none
+	// Provider is the pool imported accounts join when the request names
+	// none (see ClientKey.Provider).
+	Provider  string    `json:"provider,omitempty"`
 	KeyHash   string    `json:"keyHash"`
 	KeyPrefix string    `json:"keyPrefix"`
 	Key       string    `json:"key,omitempty"` // plaintext so the admin can copy it again; empty for keys created before this field existed
@@ -129,7 +342,7 @@ type ImportKey struct {
 
 type Account struct {
 	ID          string    `json:"id"`
-	Provider    string    `json:"provider,omitempty"` // opendesign (default) | river
+	Provider    string    `json:"provider,omitempty"` // opendesign (default) | river | ollama
 	Name        string    `json:"name"`
 	Email       string    `json:"email,omitempty"`
 	UserID      string    `json:"userId,omitempty"`
@@ -211,13 +424,16 @@ type Config struct {
 	Accounts   []Account   `json:"accounts"`
 	Routing    Routing     `json:"routing"`
 	Quota      Quota       `json:"quota"`
-	// ErrorRules / RetryRules are the OpenDesign pool's; River has its own.
-	ErrorRules      []rules.ErrorRule `json:"errorRules"`
-	RetryRules      []rules.RetryRule `json:"retryRules"`
-	RiverErrorRules []rules.ErrorRule `json:"riverErrorRules"`
-	RiverRetryRules []rules.RetryRule `json:"riverRetryRules"`
-	Logs            Logs              `json:"logs"`
-	Pricing         pricing.Config    `json:"pricing"`
+	// ErrorRules / RetryRules are the OpenDesign pool's; River and Ollama
+	// have their own.
+	ErrorRules       []rules.ErrorRule `json:"errorRules"`
+	RetryRules       []rules.RetryRule `json:"retryRules"`
+	RiverErrorRules  []rules.ErrorRule `json:"riverErrorRules"`
+	RiverRetryRules  []rules.RetryRule `json:"riverRetryRules"`
+	OllamaErrorRules []rules.ErrorRule `json:"ollamaErrorRules"`
+	OllamaRetryRules []rules.RetryRule `json:"ollamaRetryRules"`
+	Logs             Logs              `json:"logs"`
+	Pricing          pricing.Config    `json:"pricing"`
 }
 
 func Default() *Config {
@@ -227,6 +443,7 @@ func Default() *Config {
 			RuntimeBase: "https://amr-link.open-design.ai/v1",
 			ControlBase: "https://amr-api.open-design.ai",
 			RiverBase:   "https://api.river.ai/v1",
+			OllamaBase:  "https://ollama.com/v1",
 		},
 		ClientKeys: []ClientKey{},
 		ImportKeys: []ImportKey{},
@@ -241,13 +458,15 @@ func Default() *Config {
 			FirstEventSec: 120, IdleSec: 360, HeartbeatSec: 25, RequestSec: 900,
 			MaxBodyMB: 64, ModelsCacheSec: 600, DirectMaxConns: 512, ProxyMaxConns: 32,
 		},
-		Quota:           Quota{Enabled: true, IntervalSec: 60, Concurrency: 2, StaleSec: 900},
-		ErrorRules:      rules.DefaultErrorRules(),
-		RetryRules:      rules.DefaultRetryRules(),
-		RiverErrorRules: rules.DefaultRiverErrorRules(),
-		RiverRetryRules: rules.DefaultRetryRules(),
-		Pricing:         pricing.Config{Models: pricing.Defaults(), Holidays: []string{}},
-		Logs:            Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100, MaxDetails: 500, DetailBodyKB: 6144},
+		Quota:            Quota{Enabled: true, IntervalSec: 60, Concurrency: 2, StaleSec: 900},
+		ErrorRules:       rules.DefaultErrorRules(),
+		RetryRules:       rules.DefaultRetryRules(),
+		RiverErrorRules:  rules.DefaultRiverErrorRules(),
+		RiverRetryRules:  rules.DefaultRiverRetryRules(),
+		OllamaErrorRules: rules.DefaultOllamaErrorRules(),
+		OllamaRetryRules: rules.DefaultOllamaRetryRules(),
+		Pricing:          pricing.Config{Models: pricing.Defaults(), Holidays: []string{}},
+		Logs:             Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100, MaxDetails: 500, DetailBodyKB: 6144},
 	}
 }
 
@@ -315,10 +534,14 @@ func (c *Config) Normalize() error {
 	if c.Upstream.RiverBase == "" {
 		c.Upstream.RiverBase = d.Upstream.RiverBase
 	}
+	if c.Upstream.OllamaBase == "" {
+		c.Upstream.OllamaBase = d.Upstream.OllamaBase
+	}
 	c.Upstream.RiverBase = strings.TrimRight(c.Upstream.RiverBase, "/")
 	c.Upstream.RuntimeBase = strings.TrimRight(c.Upstream.RuntimeBase, "/")
 	c.Upstream.ControlBase = strings.TrimRight(c.Upstream.ControlBase, "/")
-	for _, u := range []string{c.Upstream.RuntimeBase, c.Upstream.ControlBase, c.Upstream.RiverBase} {
+	c.Upstream.OllamaBase = strings.TrimRight(c.Upstream.OllamaBase, "/")
+	for _, u := range []string{c.Upstream.RuntimeBase, c.Upstream.ControlBase, c.Upstream.RiverBase, c.Upstream.OllamaBase} {
 		if p, err := url.Parse(u); err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Host == "" {
 			return fmt.Errorf("invalid upstream URL %q", u)
 		}
@@ -344,13 +567,26 @@ func (c *Config) Normalize() error {
 		c.RiverErrorRules = rules.DefaultRiverErrorRules()
 	}
 	if c.RiverRetryRules == nil {
-		c.RiverRetryRules = rules.DefaultRetryRules()
+		c.RiverRetryRules = rules.DefaultRiverRetryRules()
 	}
 	if err := rules.ValidateErrorRules(c.RiverErrorRules); err != nil {
 		return fmt.Errorf("river: %w", err)
 	}
 	if err := rules.ValidateRetryRules(c.RiverRetryRules); err != nil {
 		return fmt.Errorf("river: %w", err)
+	}
+	// same for a config written before the Ollama pool
+	if c.OllamaErrorRules == nil {
+		c.OllamaErrorRules = rules.DefaultOllamaErrorRules()
+	}
+	if c.OllamaRetryRules == nil {
+		c.OllamaRetryRules = rules.DefaultOllamaRetryRules()
+	}
+	if err := rules.ValidateErrorRules(c.OllamaErrorRules); err != nil {
+		return fmt.Errorf("ollama: %w", err)
+	}
+	if err := rules.ValidateRetryRules(c.OllamaRetryRules); err != nil {
+		return fmt.Errorf("ollama: %w", err)
 	}
 	if err := rules.ValidateErrorRules(c.ErrorRules); err != nil {
 		return err
@@ -424,24 +660,29 @@ func (c *Config) Normalize() error {
 			return fmt.Errorf("accounts[%s]: runtime key already used by another account", a.ID)
 		}
 		runtimeKeys[a.RuntimeKey] = true
-		if !ValidRuntimeKey(a.RuntimeKey) {
-			return fmt.Errorf("accounts[%s]: runtime key must start with sk-amr- or rv_", a.ID)
+		// the key's prefix settles the provider when it names one, so a
+		// swapped key can never leave a stale provider behind; otherwise the
+		// stored provider stands (an Ollama key carries no prefix)
+		a.Provider = ResolveProvider(a.Provider, a.RuntimeKey)
+		if !ValidRuntimeKeyFor(a.Provider, a.RuntimeKey) {
+			return fmt.Errorf("accounts[%s]: %v", a.ID, runtimeKeyError(a.Provider))
 		}
-		a.Provider = ProviderForKey(a.RuntimeKey) // the key decides, so a swapped key can't leave a stale provider
-		if a.Provider == ProviderRiver && a.ControlKey != "" {
-			return fmt.Errorf("accounts[%s]: river accounts have no control key", a.ID)
+		if a.Provider == ProviderRiver || a.Provider == ProviderOllama {
+			if a.ControlKey != "" {
+				return fmt.Errorf("accounts[%s]: %s accounts have no control key", a.ID, a.Provider)
+			}
 		}
 		if a.ControlKey != "" && !strings.HasPrefix(a.ControlKey, "vela_ctrl_") {
 			return fmt.Errorf("accounts[%s]: control key must start with vela_ctrl_", a.ID)
 		}
 		if a.Group == "" {
-			a.Group = DefaultGroupFor(a.RuntimeKey)
+			a.Group = GroupForProvider(a.Provider)
 		}
 		if !groupRe.MatchString(a.Group) {
 			return fmt.Errorf("accounts[%s]: invalid group", a.ID)
 		}
 		if p, ok := groupProvider[a.Group]; ok && p != a.Provider {
-			return fmt.Errorf("accounts[%s]: group %q already holds %s accounts; OpenDesign and River pools must use separate groups", a.ID, a.Group, p)
+			return fmt.Errorf("accounts[%s]: group %q already holds %s accounts; each pool needs its own group", a.ID, a.Group, p)
 		}
 		groupProvider[a.Group] = a.Provider
 		if a.Name == "" {
@@ -483,6 +724,22 @@ func (c *Config) Normalize() error {
 		kept = append(kept, a)
 	}
 	c.Accounts = kept
+	// A key belongs to the pool of its group; that pool's accounts (if any)
+	// decide, so a key can't be routed into another pool by a stale field.
+	for i := range c.ClientKeys {
+		p, err := c.keyProvider(c.ClientKeys[i].Provider, c.ClientKeys[i].Group)
+		if err != nil {
+			return fmt.Errorf("clientKeys[%s]: %w", c.ClientKeys[i].ID, err)
+		}
+		c.ClientKeys[i].Provider = p
+	}
+	for i := range c.ImportKeys {
+		p, err := c.keyProvider(c.ImportKeys[i].Provider, c.ImportKeys[i].Group)
+		if err != nil {
+			return fmt.Errorf("importKeys[%s]: %w", c.ImportKeys[i].ID, err)
+		}
+		c.ImportKeys[i].Provider = p
+	}
 
 	r := &c.Routing
 	if r.Strategy == "" {
@@ -740,7 +997,7 @@ func Mask(key string) string {
 		return ""
 	}
 	prefix := ""
-	for _, p := range []string{"vela_ctrl_", "sk-amr-", "sk-", RiverKeyPrefix} {
+	for _, p := range []string{"vela_ctrl_", "sk-amr-", "sk-", RiverKeyPrefix, OllamaKeyPrefix} {
 		if strings.HasPrefix(key, p) {
 			prefix = p
 			break

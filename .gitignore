@@ -3,6 +3,8 @@
 /odb
 /bin/
 *.tmp
+# 账号审计工具与账号数据（50MB，含明文账号/邮箱），不进仓库
+/tools/
 # 临时产物记录
 /_tmp_artifacts.md
 # node / pnpm

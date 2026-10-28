@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"io/fs"
 	"net/http"
@@ -281,9 +282,13 @@ func (s *Server) accountViews(cfg *config.Config) []accountView {
 			RuntimeKey: config.Mask(a.RuntimeKey), ControlKey: config.Mask(a.ControlKey), HasControlKey: a.ControlKey != "",
 			MaxConcurrent: a.MaxConc, MaxRPM: a.MaxRPM, Weight: a.Weight, Priority: a.Priority,
 			HasProxy: a.ProxyURL != "", ProxyURL: maskProxy(a.ProxyURL), CreatedAt: a.CreatedAt, Runtime: views[a.ID], Usage24h: usage[a.ID]}
-		if q := snaps[a.ID]; q != nil && (q.WorkspaceID != "" || !q.PlanAt.IsZero() || q.LastError != "" || !q.CatalogAt.IsZero()) {
+		if q := snaps[a.ID]; q != nil && (q.WorkspaceID != "" || !q.PlanAt.IsZero() || q.LastError != "" || !q.CatalogAt.IsZero() || q.Ollama != nil) {
 			v.Quota = q
-			v.QuotaFresh = q.Fresh(now, time.Duration(cfg.Quota.StaleSec)*time.Second)
+			if a.Provider == config.ProviderOllama {
+				v.QuotaFresh = q.FreshOllama(now, time.Duration(cfg.Quota.StaleSec)*time.Second)
+			} else {
+				v.QuotaFresh = q.Fresh(now, time.Duration(cfg.Quota.StaleSec)*time.Second)
+			}
 			for _, other := range byWS[q.WorkspaceID] {
 				if other != a.ID {
 					v.SharedWith = append(v.SharedWith, other)
@@ -297,8 +302,7 @@ func (s *Server) accountViews(cfg *config.Config) []accountView {
 
 // providerParam is the ?provider= pool filter ("" means no filter).
 func providerParam(r *http.Request) string {
-	switch p := r.URL.Query().Get("provider"); p {
-	case config.ProviderOpenDesign, config.ProviderRiver:
+	if p := r.URL.Query().Get("provider"); config.KnownProvider(p) {
 		return p
 	}
 	return ""
@@ -321,6 +325,7 @@ func (s *Server) apiAccounts(w http.ResponseWriter, r *http.Request) {
 
 type accountInput struct {
 	ExpectedRevision *int64  `json:"expectedRevision"`
+	Provider         *string `json:"provider"`
 	Name             *string `json:"name"`
 	Email            *string `json:"email"`
 	Note             *string `json:"note"`
@@ -348,6 +353,9 @@ func (in accountInput) apply(a *config.Account) {
 	set(&a.Email, in.Email)
 	set(&a.Note, in.Note)
 	set(&a.Group, in.Group)
+	if in.Provider != nil && config.KnownProvider(strings.TrimSpace(*in.Provider)) {
+		a.Provider = strings.TrimSpace(*in.Provider)
+	}
 	if in.Enabled != nil {
 		a.Enabled = *in.Enabled
 	}
@@ -395,8 +403,10 @@ func (s *Server) apiCreateAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	a := config.Account{ID: config.NewID("acc_"), Enabled: true}
 	in.apply(&a)
+	// an Ollama key has no prefix to read the provider from: take it as given
+	a.Provider = config.ResolveProvider(a.Provider, a.RuntimeKey)
 	if a.Group == "" {
-		a.Group = config.DefaultGroupFor(a.RuntimeKey)
+		a.Group = config.GroupForProvider(a.Provider)
 	}
 	cfg, err := s.cfg.Update(rev(in.ExpectedRevision), func(c *config.Config) error {
 		c.Accounts = append(c.Accounts, a)
@@ -451,14 +461,22 @@ func (s *Server) apiDeleteAccount(w http.ResponseWriter, r *http.Request) {
 }
 
 // apiImportAccounts takes one account per line:
-// runtimeKey[,controlKey[,name[,proxyUrl]]] (commas, tabs or spaces).
+// runtimeKey[,controlKey[,name[,proxyUrl]]] (commas, tabs or spaces). Key
+// lines are importKeys; every line also accepts an optional leading
+// "provider:ollama" field, or an "oll-' prefixed key, for Ollama.
 func (s *Server) apiImportAccounts(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Text  string `json:"text"`
-		Group string `json:"group"`
+		Text     string `json:"text"`
+		Group    string `json:"group"`
+		Provider string `json:"provider"`
 	}
 	if err := readBody(r, &in); err != nil {
 		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	declared := strings.TrimSpace(in.Provider)
+	if declared != "" && !config.KnownProvider(declared) {
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
 		return
 	}
 	rec := importRecord{Source: "console", Group: strings.TrimSpace(in.Group)}
@@ -471,8 +489,17 @@ func (s *Server) apiImportAccounts(w http.ResponseWriter, r *http.Request) {
 		}
 		f := strings.FieldsFunc(line, func(r rune) bool { return r == ',' || r == '\t' || r == ' ' })
 		a := config.Account{ID: config.NewID("acc_"), Enabled: true, Group: strings.TrimSpace(in.Group)}
+		provider := declared
 		for _, field := range f {
+			if p, ok := strings.CutPrefix(field, "provider:"); ok && config.KnownProvider(p) {
+				provider = p // this line's own pool wins over the import's
+				continue
+			}
 			switch {
+			case provider == config.ProviderOllama && a.RuntimeKey == "" && !strings.Contains(field, "://") && field != "":
+				// an Ollama key has no prefix the pool can check, so the
+				// first free token of such a line is the key
+				a.RuntimeKey = field
 			case config.ValidRuntimeKey(field) && a.RuntimeKey == "":
 				a.RuntimeKey = field
 			case strings.HasPrefix(field, "vela_ctrl_") && a.ControlKey == "":
@@ -483,9 +510,13 @@ func (s *Server) apiImportAccounts(w http.ResponseWriter, r *http.Request) {
 				a.Name = field
 			}
 		}
-		if a.RuntimeKey == "" {
-			errs = append(errs, "第 "+strconv.Itoa(n+1)+" 行缺少 sk-amr- / rv_ 运行密钥")
+		a.Provider = config.ResolveProvider(provider, a.RuntimeKey)
+		if !config.ValidRuntimeKeyFor(a.Provider, a.RuntimeKey) {
+			errs = append(errs, "第 "+strconv.Itoa(n+1)+" 行缺少运行密钥（OpenDesign 的 sk-amr- / River 的 rv_ / Ollama 的任意 key）")
 			continue
+		}
+		if a.Group == "" {
+			a.Group = config.GroupForProvider(a.Provider)
 		}
 		added = append(added, a)
 	}
@@ -595,12 +626,27 @@ func (s *Server) apiTestAccount(w http.ResponseWriter, r *http.Request) {
 			out["control"] = map[string]any{"ok": true, "workspaceId": ws.WorkspaceID(), "workspaceName": ws.Name, "tier": ws.PersonalMembershipTier}
 		}
 	}
+	if a.Provider == config.ProviderOllama {
+		// the API key reads its own balance; a refused read is the key itself
+		qc := &quota.Client{Base: cfg.ControlBase(a), HTTP: client}
+		if b, err := qc.Balance(ctx, cfg.ControlBase(a), a.RuntimeKey); err != nil {
+			out["balance"] = map[string]any{"ok": false, "error": err.Error()}
+		} else {
+			out["balance"] = map[string]any{"ok": true, "includedUsd": b.IncludedUSD, "allowanceUsd": b.AllowanceUSD,
+				"purchasedUsd": b.PurchasedUSD, "sessionPercent": percentJSON(b.SessionPercent), "weeklyPercent": percentJSON(b.WeeklyPercent),
+				"periodUntil": b.PeriodUntil}
+		}
+	}
 	if in.Inference {
 		model := in.Model
 		if model == "" {
-			model = "deepseek-v4.1-flash"
-			if a.Provider == config.ProviderRiver {
+			switch a.Provider {
+			case config.ProviderRiver:
 				model = "deepseek-ai/DeepSeek-V4.1-Flash"
+			case config.ProviderOllama:
+				model = "gpt-oss:20b"
+			default:
+				model = "deepseek-v4.1-flash"
 			}
 		}
 		payload, _ := json.Marshal(map[string]any{"model": model, "max_tokens": 1, "messages": []map[string]string{{"role": "user", "content": "ping"}}})
@@ -835,7 +881,7 @@ func (s *Server) apiClientKeys(w http.ResponseWriter, r *http.Request) {
 	out := []view{}
 	want := providerParam(r)
 	for _, k := range cfg.ClientKeys {
-		if want != "" && providerOf(cfg.GroupProvider(k.Group)) != want {
+		if want != "" && keyPool(cfg, k) != want {
 			continue // a key whose group is empty counts as OpenDesign
 		}
 		out = append(out, view{k.ID, k.Name, k.Group, k.KeyPrefix, k.Key, k.Enabled, k.CreatedAt})
@@ -845,15 +891,27 @@ func (s *Server) apiClientKeys(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) apiCreateClientKey(w http.ResponseWriter, r *http.Request) {
 	var in struct {
-		Name  string `json:"name"`
-		Group string `json:"group"`
+		Name     string `json:"name"`
+		Group    string `json:"group"`
+		Provider string `json:"provider"`
 	}
 	if err := readBody(r, &in); err != nil {
 		apiError(w, http.StatusBadRequest, err)
 		return
 	}
+	// the pool is written on the key itself, so it stays this pool's key even
+	// while its group holds no account yet; the console tab names it, else
+	// the request does
+	provider := strings.TrimSpace(in.Provider)
+	if provider == "" {
+		provider = providerParam(r)
+	}
+	if provider != "" && !config.KnownProvider(provider) {
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
+		return
+	}
 	key := "sk-odb-" + randHex(24)
-	k := config.ClientKey{ID: config.NewID("ck_"), Name: strings.TrimSpace(in.Name), Group: strings.TrimSpace(in.Group),
+	k := config.ClientKey{ID: config.NewID("ck_"), Name: strings.TrimSpace(in.Name), Group: strings.TrimSpace(in.Group), Provider: provider,
 		KeyHash: config.HashKey(key), KeyPrefix: key[:11] + "…" + key[len(key)-4:], Key: key, Enabled: true, CreatedAt: time.Now().UTC()}
 	if _, err := s.cfg.Update(-1, func(c *config.Config) error { c.ClientKeys = append(c.ClientKeys, k); return nil }); err != nil {
 		s.configError(w, err)
@@ -865,12 +923,17 @@ func (s *Server) apiCreateClientKey(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiUpdateClientKey(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var in struct {
-		Name    *string `json:"name"`
-		Group   *string `json:"group"`
-		Enabled *bool   `json:"enabled"`
+		Name     *string `json:"name"`
+		Group    *string `json:"group"`
+		Provider *string `json:"provider"`
+		Enabled  *bool   `json:"enabled"`
 	}
 	if err := readBody(r, &in); err != nil {
 		apiError(w, http.StatusBadRequest, err)
+		return
+	}
+	if in.Provider != nil && !config.KnownProvider(strings.TrimSpace(*in.Provider)) {
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
 		return
 	}
 	_, err := s.cfg.Update(-1, func(c *config.Config) error {
@@ -882,8 +945,24 @@ func (s *Server) apiUpdateClientKey(w http.ResponseWriter, r *http.Request) {
 			if in.Name != nil {
 				k.Name = strings.TrimSpace(*in.Name)
 			}
-			if in.Group != nil {
-				k.Group = strings.TrimSpace(*in.Group)
+			if in.Group != nil && strings.TrimSpace(*in.Group) != k.Group {
+				// a key may only move to a group of its own pool: handing an
+				// Ollama key to River's group would make it route elsewhere
+				group := strings.TrimSpace(*in.Group)
+				pool := c.GroupPool(group)
+				if want := in.Provider; want != nil {
+					pool = strings.TrimSpace(*want)
+				}
+				if pool == "" {
+					pool = k.Provider
+				}
+				if pool != k.Provider {
+					return fmt.Errorf("group %q 属于 %s 号池，这把密钥属于 %s 号池：同一把密钥不能换池，请新建密钥", group, pool, k.Provider)
+				}
+				k.Group = group
+			}
+			if in.Provider != nil {
+				k.Provider = strings.TrimSpace(*in.Provider)
 			}
 			if in.Enabled != nil {
 				k.Enabled = *in.Enabled
@@ -934,15 +1013,12 @@ func (s *Server) apiSettings(w http.ResponseWriter, r *http.Request) {
 	c := s.cfg.Get()
 	prov := providerOf(providerParam(r)) // the pool whose rules are shown
 	errRules, retRules := c.RulesFor(prov)
-	defErr := rules.DefaultErrorRules()
-	if prov == config.ProviderRiver {
-		defErr = rules.DefaultRiverErrorRules()
-	}
+	defErr := config.DefaultErrorRulesFor(prov)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"settings":   settingsDoc{c.Revision, c.Upstream, c.Routing, c.Quota, c.Logs, c.Pricing, errRules, retRules},
 		"provider":   prov,
 		"strategies": config.Strategies,
-		"defaults":   map[string]any{"errorRules": defErr, "retryRules": rules.DefaultRetryRules(), "pricing": pricing.Defaults()},
+		"defaults":   map[string]any{"errorRules": defErr, "retryRules": config.DefaultRetryRulesFor(prov), "pricing": pricing.Defaults()},
 	})
 }
 
@@ -956,9 +1032,12 @@ func (s *Server) apiSaveSettings(w http.ResponseWriter, r *http.Request) {
 	cfg, err := s.cfg.Update(in.Revision, func(c *config.Config) error {
 		c.Upstream, c.Routing, c.Quota, c.Logs = in.Upstream, in.Routing, in.Quota, in.Logs
 		c.Pricing = in.Pricing
-		if prov == config.ProviderRiver {
+		switch prov {
+		case config.ProviderRiver:
 			c.RiverErrorRules, c.RiverRetryRules = in.ErrorRules, in.RetryRules
-		} else {
+		case config.ProviderOllama:
+			c.OllamaErrorRules, c.OllamaRetryRules = in.ErrorRules, in.RetryRules
+		default:
 			c.ErrorRules, c.RetryRules = in.ErrorRules, in.RetryRules
 		}
 		return nil
@@ -1110,6 +1189,9 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 	windows := map[int64]*windowTotal{}
 	wallet, walletKnown := 0.0, 0
 	authFailed := 0
+	// Ollama credits are per key (a team shares one balance, which this can't
+	// dedupe), so they are summed per account and reported apart
+	ollamaCredits, ollamaKnown := 0.0, 0
 	for _, v := range views {
 		statusCount[v.Runtime.Status]++
 		groups[v.Group]++
@@ -1119,6 +1201,22 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 		}
 		if q.AuthFailed {
 			authFailed++
+		}
+		if v.Provider == config.ProviderOllama {
+			if !v.QuotaFresh || q.Ollama == nil {
+				continue
+			}
+			got := false
+			for _, s := range []string{q.Ollama.IncludedUSD, q.Ollama.PurchasedUSD} {
+				if f, ok := quota.ParseUSD(s); ok {
+					ollamaCredits += f
+					got = true
+				}
+			}
+			if got {
+				ollamaKnown++
+			}
+			continue
 		}
 		// the same workspace is counted once; failed or stale reads count nothing
 		if !v.QuotaFresh || q.WorkspaceID == "" || seenWS[q.WorkspaceID] {
@@ -1152,7 +1250,7 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 		groupList = append(groupList, g)
 	}
 	for _, k := range cfg.ClientKeys {
-		if want != "" && providerOf(cfg.GroupProvider(k.Group)) != want {
+		if want != "" && keyPool(cfg, k) != want {
 			continue
 		}
 		if _, ok := groups[k.Group]; !ok {
@@ -1168,6 +1266,8 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 		"windows":        wl,
 		"walletUsd":      wallet,
 		"walletAccounts": walletKnown,
+		"ollamaCredits":  ollamaCredits,
+		"ollamaAccounts": ollamaKnown,
 		"authFailed":     authFailed,
 		"workspaces":     len(seenWS),
 		"bindings":       s.pool.BindingCount(),
@@ -1180,10 +1280,31 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// keyPool is the pool a downstream key belongs to: its stored provider when
+// the group has no account to say otherwise.
+func keyPool(cfg *config.Config, k config.ClientKey) string {
+	if p := cfg.GroupProvider(k.Group); p != "" {
+		return p
+	}
+	if k.Provider != "" {
+		return k.Provider
+	}
+	return providerOf(cfg.GroupPool(k.Group))
+}
+
 // providerOf normalizes an account's stored provider (empty = OpenDesign).
 func providerOf(p string) string {
 	if p == "" {
 		return config.ProviderOpenDesign
 	}
 	return p
+}
+
+// percentJSON reports a legacy Ollama percentage as -1 when the plan has no
+// such limit, so the console can tell "no limit" from "0% left".
+func percentJSON(v *int) int {
+	if v == nil {
+		return -1
+	}
+	return *v
 }

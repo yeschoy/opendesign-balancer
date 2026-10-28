@@ -292,6 +292,126 @@ func ParseUSD(s string) (float64, bool) {
 	return f, err == nil
 }
 
+// OllamaBalance is GET {apiRoot}/api/balance: the credits an Ollama API key
+// has left (docs.ollama.com/api/balance). Two shapes exist — the plan's
+// included allowance over a period, and the legacy session/weekly limits —
+// and either may carry a purchased balance next to it.
+type OllamaBalance struct {
+	// IncludedUSD is what is left of the included allowance, AllowanceUSD the
+	// allowance itself; PeriodFrom/PeriodUntil bound the period.
+	IncludedUSD  string    `json:"includedUsd,omitempty"`
+	AllowanceUSD string    `json:"allowanceUsd,omitempty"`
+	PeriodFrom   time.Time `json:"periodFrom,omitzero"`
+	PeriodUntil  time.Time `json:"periodUntil,omitzero"`
+	// SessionPercent / WeeklyPercent and their reset times are the legacy
+	// plans' limits. A nil percent means the plan reports no such limit, which
+	// is not the same as a reported 0% (nothing left).
+	SessionPercent  *int      `json:"sessionPercent,omitempty"`
+	SessionResetsAt time.Time `json:"sessionResetsAt,omitzero"`
+	WeeklyPercent   *int      `json:"weeklyPercent,omitempty"`
+	WeeklyResetsAt  time.Time `json:"weeklyResetsAt,omitzero"`
+	// PurchasedUSD is the unexpired purchased credits.
+	PurchasedUSD string `json:"purchasedUsd,omitempty"`
+}
+
+type rawOllamaBalance struct {
+	Included *struct {
+		BalanceUSD   *float64 `json:"balance_usd"`
+		AllowanceUSD *float64 `json:"allowance_usd"`
+		Period       *struct {
+			From  string `json:"from"`
+			Until string `json:"until"`
+		} `json:"period"`
+		Session *struct {
+			RemainingPercent *float64 `json:"remaining_percent"`
+			ResetsAt         string   `json:"resets_at"`
+		} `json:"session"`
+		Weekly *struct {
+			RemainingPercent *float64 `json:"remaining_percent"`
+			ResetsAt         string   `json:"resets_at"`
+		} `json:"weekly"`
+	} `json:"included"`
+	Purchased *struct {
+		BalanceUSD *float64 `json:"balance_usd"`
+	} `json:"purchased"`
+}
+
+// money renders a reported amount the way the package keeps money: a decimal
+// string, and nothing at all when the field was absent (never a guessed zero).
+func money(f *float64) string {
+	if f == nil {
+		return ""
+	}
+	return strconv.FormatFloat(*f, 'f', -1, 64)
+}
+
+func percentOf(n *float64) *int {
+	if n == nil {
+		return nil
+	}
+	v := int(max(0, min(*n, 100)))
+	return &v
+}
+
+// Balance reads the credits an Ollama API key has left. apiRoot is the host
+// the native API hangs off (https://ollama.com for the cloud, the inference
+// base without /v1 for a self-hosted server). The endpoint allows 10 requests
+// a minute per user across all keys, so callers poll it sparingly.
+func (c *Client) Balance(ctx context.Context, apiRoot, key string) (OllamaBalance, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiRoot+"/api/balance", nil)
+	if err != nil {
+		return OllamaBalance{}, err
+	}
+	req.Header.Set("Authorization", "Bearer "+key)
+	req.Header.Set("Accept", "application/json")
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		return OllamaBalance{}, fmt.Errorf("network error")
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return OllamaBalance{}, fmt.Errorf("read error")
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		var e struct {
+			Error string `json:"error"`
+		}
+		code := ""
+		if json.Unmarshal(body, &e) == nil {
+			code = codeRe(strings.ReplaceAll(e.Error, " ", "_"))
+		}
+		return OllamaBalance{}, &HTTPError{Status: resp.StatusCode, Code: code}
+	}
+	var raw rawOllamaBalance
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return OllamaBalance{}, fmt.Errorf("invalid balance JSON")
+	}
+	b := OllamaBalance{}
+	if in := raw.Included; in != nil {
+		b.IncludedUSD, b.AllowanceUSD = money(in.BalanceUSD), money(in.AllowanceUSD)
+		if in.Period != nil {
+			b.PeriodFrom, _ = time.Parse(time.RFC3339Nano, in.Period.From)
+			b.PeriodUntil, _ = time.Parse(time.RFC3339Nano, in.Period.Until)
+		}
+		if in.Session != nil {
+			b.SessionPercent = percentOf(in.Session.RemainingPercent)
+			b.SessionResetsAt, _ = time.Parse(time.RFC3339Nano, in.Session.ResetsAt)
+		}
+		if in.Weekly != nil {
+			b.WeeklyPercent = percentOf(in.Weekly.RemainingPercent)
+			b.WeeklyResetsAt, _ = time.Parse(time.RFC3339Nano, in.Weekly.ResetsAt)
+		}
+	}
+	if raw.Purchased != nil {
+		b.PurchasedUSD = money(raw.Purchased.BalanceUSD)
+	}
+	if b.IncludedUSD == "" && b.PurchasedUSD == "" && b.SessionPercent == nil && b.WeeklyPercent == nil {
+		return OllamaBalance{}, fmt.Errorf("balance JSON reports no balances")
+	}
+	return b, nil
+}
+
 // FetchCatalog lists the models a runtime key may call, from the key's own
 // /v1/models: the catalogue carries plan entitlement (a model above the
 // key's plan is absent or `enabled: false`), which is what the official
