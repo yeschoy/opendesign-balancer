@@ -55,6 +55,7 @@ type requestLog struct {
 	ClientKeyID        string             `json:"clientKeyId,omitempty"`
 	ClientKeyName      string             `json:"clientKeyName,omitempty"`
 	Group              string             `json:"group,omitempty"`
+	Provider           string             `json:"provider,omitempty"`
 	Path               string             `json:"path"`
 	InboundProtocol    string             `json:"inboundProtocol"`
 	Protocol           string             `json:"protocol"`
@@ -97,6 +98,7 @@ type errorLog struct {
 	AttemptIndex        int       `json:"attemptIndex"`
 	ClientKeyID         string    `json:"clientKeyId,omitempty"`
 	ClientKeyName       string    `json:"clientKeyName,omitempty"`
+	Provider            string    `json:"provider,omitempty"`
 	AccountID           string    `json:"accountId"`
 	AccountName         string    `json:"accountName"`
 	Model               string    `json:"model"`
@@ -141,13 +143,13 @@ func cacheRate(in, cached *int64, anthropic bool) *float64 {
 func (r *requestLog) LogKeys() map[string]string {
 	return map[string]string{"requestId": r.RequestID, "accountId": r.AccountID, "status": strconv.Itoa(r.Status),
 		"result": r.Result, "model": r.Model, "errorCategory": r.ErrorCategory, "bindingResult": r.BindingResult,
-		"clientKeyId": r.ClientKeyID, "stream": strconv.FormatBool(r.Stream), "protocol": r.Protocol,
+		"provider": r.Provider, "clientKeyId": r.ClientKeyID, "stream": strconv.FormatBool(r.Stream), "protocol": r.Protocol,
 		"affinityKeyType": r.AffinityKeyType, "affinityConfidence": r.AffinityConfidence}
 }
 
 func (e errorLog) LogKeys() map[string]string {
 	return map[string]string{"requestId": e.RequestID, "accountId": e.AccountID, "status": strconv.Itoa(e.Status),
-		"category": e.Category, "ruleId": e.RuleID, "model": e.Model, "clientKeyId": e.ClientKeyID}
+		"category": e.Category, "ruleId": e.RuleID, "model": e.Model, "clientKeyId": e.ClientKeyID, "provider": e.Provider}
 }
 
 // ---- attempt results ----
@@ -295,7 +297,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		if cw != nil {
 			max := cw.max
 			d := &detailLog{TS: rec.TS, RequestID: rid, Protocol: rec.Protocol, Method: r.Method, Path: r.URL.Path, Model: rec.Model,
-				ClientKeyID: rec.ClientKeyID, ClientKeyName: rec.ClientKeyName, AccountID: rec.AccountID, Status: status, RequestHeaders: maskHeaders(cfg, reqHeader), RequestBodyBytes: len(reqBody),
+				ClientKeyID: rec.ClientKeyID, ClientKeyName: rec.ClientKeyName, Provider: rec.Provider, AccountID: rec.AccountID, Status: status, RequestHeaders: maskHeaders(cfg, reqHeader), RequestBodyBytes: len(reqBody),
 				ResponseHeaders: maskHeaders(cfg, cw.Header()), ResponseBodyBytes: cw.n}
 			d.RequestBody, d.RequestBodyTruncated = maskBody(cfg, reqBody, max)
 			respBody, cut := cw.body()
@@ -310,7 +312,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 				prompt += *rec.CachedTokens
 			}
 		}
-		s.stats.Record(stats.Sample{AccountID: rec.AccountID, Proxy: rec.Proxy, Model: rec.Model, Result: result, Input: rec.InputTokens, Output: rec.OutputTokens,
+		s.stats.Record(stats.Sample{AccountID: rec.AccountID, Provider: rec.Provider, Proxy: rec.Proxy, Model: rec.Model, Result: result, Input: rec.InputTokens, Output: rec.OutputTokens,
 			Cached: rec.CachedTokens, Prompt: prompt, Currency: rec.Currency, Cost: cost})
 		s.statsDirty.Store(true)
 	}
@@ -323,6 +325,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rec.ClientKeyID, rec.ClientKeyName, rec.Group = ck.ID, ck.Name, ck.Group
+	rec.Provider = cfg.GroupProvider(ck.Group)
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, int64(cfg.Routing.MaxBodyMB)<<20))
 	if err != nil {
 		var mbe *http.MaxBytesError
@@ -551,7 +554,7 @@ func (s *Server) evaluate(cfg *config.Config, acct config.Account, model string,
 	reason, truncated := errorReason(cfg, res.body, res.contentType)
 	redacted := redactSecrets(cfg, clip(string(res.body), 16<<10))
 	matchText := strings.ToLower(redacted)
-	el := errorLog{TS: now.UTC(), RequestID: rid, AttemptIndex: idx, ClientKeyID: keyID, ClientKeyName: keyName, AccountID: acct.ID, AccountName: acct.Name, Model: model,
+	el := errorLog{TS: now.UTC(), RequestID: rid, AttemptIndex: idx, ClientKeyID: keyID, ClientKeyName: keyName, Provider: acct.Provider, AccountID: acct.ID, AccountName: acct.Name, Model: model,
 		Status: res.status, Category: res.category, Terminal: res.terminal, Reason: reason, ReasonTruncated: truncated,
 		MatchedBy: "default", HealthAction: "degrade", ResponseContentType: strings.SplitN(res.contentType, ";", 2)[0], ResponseBytes: len(res.body)}
 	if res.upstreamStatus != 0 {

@@ -38,3 +38,33 @@ func TestImportBackfillsPromptForOldBuckets(t *testing.T) {
 		t.Fatalf("total = %+v", tot)
 	}
 }
+
+func TestSummaryPerProvider(t *testing.T) {
+	s := New()
+	s.Record(Sample{AccountID: "o", Provider: "opendesign", Model: "m", Result: "success"})
+	s.Record(Sample{AccountID: "r", Provider: "river", Model: "x", Result: "success"})
+	s.Record(Sample{AccountID: "r", Provider: "river", Model: "x", Result: "failed"})
+	if got := s.Summary().Total.Requests; got != 3 {
+		t.Fatalf("all = %d", got)
+	}
+	r := s.SummaryFor("river")
+	if r.Total.Requests != 2 || len(r.Accounts) != 1 || r.Models["x"].Requests != 2 || r.Models["m"].Requests != 0 {
+		t.Fatalf("river = %+v", r)
+	}
+	if s.SummaryFor("opendesign").Total.Requests != 1 || s.SummaryFor("none").Total.Requests != 0 {
+		t.Fatal("provider split wrong")
+	}
+	s2 := New()
+	s2.Import(s.Export())
+	if s2.SummaryFor("river").Total.Requests != 2 {
+		t.Fatal("provider stats lost across export/import")
+	}
+	// metadata written before providers existed: all of it was OpenDesign
+	old := s.Export()
+	old.Providers = nil
+	s3 := New()
+	s3.Import(old)
+	if s3.SummaryFor("opendesign").Total.Requests != 3 || s3.SummaryFor("river").Total.Requests != 0 {
+		t.Fatal("legacy stats not attributed to opendesign")
+	}
+}

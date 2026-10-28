@@ -8,6 +8,10 @@ let accountsCache = [];
 let settingsCache = null;
 let currentPage = 'overview';
 let refreshTimer = null;
+// the pool tab on top: every list, overview and log shows one pool only
+let pool = ['opendesign', 'river'].includes(localStorage.getItem('odb-pool')) ? localStorage.getItem('odb-pool') : 'opendesign';
+const POOL_LABEL = { opendesign: 'OpenDesign', river: 'River' };
+const withPool = (path) => path + (path.includes('?') ? '&' : '?') + 'provider=' + pool;
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const num = (v) => (v === null || v === undefined || Number.isNaN(v)) ? '—' : Number(v).toLocaleString('en-US');
@@ -163,6 +167,7 @@ function showApp() {
   $('#auth').classList.add('hidden');
   $('#app').classList.remove('hidden');
   $('#base-url').textContent = location.origin;
+  renderPoolTabs();
   go(location.hash.slice(1) || 'overview');
 }
 
@@ -180,18 +185,36 @@ function go(page) {
     refreshTimer = setInterval(() => { if (!document.hidden && !$('#modal').open) pages[currentPage]().catch(() => {}); }, 15000);
   }
 }
+function renderPoolTabs() {
+  $$('#pool-tabs .pool-tab').forEach((b) => b.classList.toggle('active', b.dataset.pool === pool));
+  document.title = POOL_LABEL[pool] + ' 账号池';
+  document.body.dataset.pool = pool;
+  $('#btn-add-device').classList.toggle('hidden', pool === 'river');
+  $('#acc-empty').textContent = pool === 'river' ? '还没有 River 账号。点「批量导入」粘贴 rv_ 开头的 key，每行一个。' : '还没有账号。点「设备授权添加」，在已登录该账号的浏览器里批准即可。';
+}
+$('#pool-tabs').addEventListener('click', (ev) => {
+  const b = ev.target.closest('.pool-tab');
+  if (!b || b.dataset.pool === pool) return;
+  pool = b.dataset.pool;
+  localStorage.setItem('odb-pool', pool);
+  accountsCache = [];
+  logState.requests = { cursor: '', items: [] }; logState.errors = { cursor: '', items: [] }; logState.details = { cursor: '', items: [] };
+  $('#acc-group-filter').value = '';
+  renderPoolTabs();
+  go(currentPage);
+});
 $('#nav').addEventListener('click', (ev) => { const a = ev.target.closest('a[data-page]'); if (a) go(a.dataset.page); });
 
 // ---- overview ----
 async function loadOverview() {
-  const o = await api('GET', '/api/overview');
+  const o = await api('GET', withPool('/api/overview'));
   const st = o.stats.total;
   const okRate = st.r ? (st.s / Math.max(1, st.r - st.c)) : null;
   const ok = o.status.ok || 0;
   const cards = [
     ['账号', `${ok} / ${o.accounts}`, `可调度 / 总数${o.authFailed ? ` · ${o.authFailed} 个控制密钥失效` : ''}`],
-    ...o.windows.map((w) => [`${fmtDur(w.durationSeconds)}窗口剩余`, num(w.remaining), `共 ${num(w.limit)} · ${w.workspaces} 个工作区 · 已用 ${w.limit ? (w.used / w.limit * 100).toFixed(1) : 0}%`]),
-    ['钱包合计', '$' + o.walletUsd.toFixed(2), `${o.walletAccounts} 个工作区`],
+    ...(pool === 'river' ? [] : o.windows).map((w) => [`${fmtDur(w.durationSeconds)}窗口剩余`, num(w.remaining), `共 ${num(w.limit)} · ${w.workspaces} 个工作区 · 已用 ${w.limit ? (w.used / w.limit * 100).toFixed(1) : 0}%`]),
+    ...(pool === 'river' ? [] : [['钱包合计', '$' + o.walletUsd.toFixed(2), `${o.walletAccounts} 个工作区`]]),
     ['24h 请求', num(st.r), `成功率 ${okRate === null ? '—' : pct(okRate)} · 近 1h ${num(o.stats.lastHour.r)}`],
     ['24h 费用', costSum(st), '按模型价格估算，未配价格的不计'],
     ['24h 缓存命中率', hitRate(st) === null ? '—' : pct(hitRate(st)), `缓存 ${num(st.k)} / 提示 ${num(st.p)} token`],
@@ -220,7 +243,7 @@ async function loadOverview() {
   $('#ov-windows').innerHTML = o.windows.length ? o.windows.map((w) => {
     const used = w.limit ? w.used / w.limit * 100 : 0;
     return `<div class="win"><div class="row"><b>${esc(fmtDur(w.durationSeconds))}</b><span class="muted">剩余 ${num(w.remaining)} / ${num(w.limit)} credits</span></div><div class="bar ${used >= 98 ? 'bad' : used >= 90 ? 'warn' : ''}"><i data-w="${used}"></i></div></div>`;
-  }).join('') : '<p class="muted">暂无额度数据（需要账号配置 vela_ctrl_ 控制密钥）。</p>';
+  }).join('') : `<p class="muted">${pool === 'river' ? 'River 没有额度接口，额度用完靠上游 402 / 429 错误推断冷却。' : '暂无额度数据（需要账号配置 vela_ctrl_ 控制密钥）。'}</p>`;
   applyWidths($('#ov-windows'));
   $('#ov-status').innerHTML = Object.entries(o.status).map(([k, v]) => `<span class="badge ${statusClass(k)}">${esc(statusLabel(k))} ${v}</span>`).join('') || '<span class="muted">无账号</span>';
   $('#ov-updated').textContent = '更新于 ' + fmtTime(o.stats.generated);
@@ -298,7 +321,7 @@ function accountRow(a) {
 }
 
 async function loadAccounts() {
-  const d = await api('GET', '/api/accounts');
+  const d = await api('GET', withPool('/api/accounts'));
   accountsCache = d.accounts;
   const groups = [...new Set(d.accounts.map((a) => a.group))].sort();
   const sel = $('#acc-group-filter');
@@ -314,7 +337,7 @@ async function loadAccounts() {
 // ---- staging: open-endpoint imports that collide with an account ----
 const REASON = { runtimeKey: '运行密钥相同', controlKey: '控制密钥相同', name: '名称相同' };
 async function loadStaging() {
-  const d = await api('GET', '/api/staging');
+  const d = await api('GET', withPool('/api/staging'));
   const items = d.items || [];
   const cnt = $('#stg-count');
   cnt.textContent = items.length + ' 条待处理';
@@ -399,10 +422,11 @@ async function accountAction(a, act) {
 
 function accountForm(a) {
   const v = (k, d = '') => esc(a ? (a[k] ?? d) : d);
+  const defGroup = pool === 'river' ? 'river' : 'default';
   return `<div class="form">
     <label>名称</label><input id="f-name" value="${v('name')}" maxlength="50">
     <label>邮箱</label><input id="f-email" value="${v('email')}">
-    <label>分组</label><input id="f-group" value="${v('group', 'default')}" placeholder="default">
+    <label>分组</label><input id="f-group" value="${v('group', defGroup)}" placeholder="${defGroup}">
     <span class="hint">下游密钥只调度同分组的账号</span>
     <label>运行密钥</label><input id="f-rt" placeholder="${a ? esc(a.runtimeKey) + '（留空不变）' : 'sk-amr-… 或 River 的 rv_…'}" autocomplete="off">
     <label>控制密钥</label><input id="f-ctrl" placeholder="${a && a.hasControlKey ? esc(a.controlKey) + '（留空不变）' : 'vela_ctrl_…（可选，用于读额度）'}" autocomplete="off">
@@ -457,7 +481,7 @@ $('#btn-import').addEventListener('click', async () => {
   await modal({ title: '批量导入', wide: true,
     body: `<p class="muted small">每行一个账号：<code>运行密钥[,控制密钥[,名称[,代理URL]]]</code>（<code>rv_</code> 开头的自动识别为 River 账号，无控制密钥），逗号、空格或制表符分隔，<code>#</code> 开头为注释。</p>
       <textarea id="imp-text" class="code" rows="10" placeholder="sk-amr-xxx,vela_ctrl_xxx,账号A&#10;rv_xxx,River-1"></textarea>
-      <div class="row"><label class="muted">分组</label><input id="imp-group" placeholder="default"></div>`,
+      <div class="row"><label class="muted">分组</label><input id="imp-group" placeholder="${pool === 'river' ? 'river' : 'default'}"></div>`,
     buttons: [{ label: '取消', value: 'c' }, { label: '导入', value: 'ok', primary: true, action: async () => {
       const r = await api('POST', '/api/accounts/import', { text: $('#imp-text').value, group: $('#imp-group').value });
       toast(`已导入 ${r.added} 个账号`);
@@ -482,7 +506,7 @@ async function testAccount(a) {
 // ---- device authorization ----
 async function deviceAuth(opts = {}) {
   let flow = null, timer = null;
-  const groups = [...new Set(accountsCache.map((a) => a.group).concat(['default']))].sort();
+  const groups = [...new Set(accountsCache.map((a) => a.group).concat([pool === 'river' ? 'river' : 'default']))].sort();
   const step1 = !opts.accountId ? `<div class="form"><label>分组</label><select id="da-group">${groups.map((g) => `<option>${esc(g)}</option>`).join('')}</select>
       <label>出站代理</label><input id="da-proxy" placeholder="可选，签发与后续请求都走它"></div>` : '';
   const target = opts.accountId ? accountsCache.find((a) => a.id === opts.accountId) : null;
@@ -528,7 +552,7 @@ $('#btn-add-device').addEventListener('click', () => deviceAuth());
 
 // ---- client keys ----
 async function loadKeys() {
-  const d = await api('GET', '/api/client-keys');
+  const d = await api('GET', withPool('/api/client-keys'));
   $('#key-table tbody').innerHTML = d.keys.map((k) => `<tr data-id="${esc(k.id)}">
     <td>${esc(k.name || '—')}</td><td><span class="badge">${esc(k.group)}</span></td><td><code>${esc(k.keyPrefix)}</code></td>
     <td><span class="badge ${k.enabled ? 'ok' : ''}">${k.enabled ? '启用' : '停用'}</span></td><td class="num">${esc(fmtTime(k.createdAt, true))}</td>
@@ -556,7 +580,7 @@ async function loadKeys() {
 $('#btn-new-key').addEventListener('click', async () => {
   let created = null;
   await modal({ title: '新建下游密钥',
-    body: `<div class="form"><label>名称</label><input id="k-name" placeholder="new-api"><label>分组</label><input id="k-group" placeholder="default"><span class="hint">只调度该分组的账号</span></div><div id="k-out"></div>`,
+    body: `<div class="form"><label>名称</label><input id="k-name" placeholder="new-api"><label>分组</label><input id="k-group" placeholder="${pool === 'river' ? 'river' : 'default'}" value="${pool === 'river' ? 'river' : 'default'}"><span class="hint">只调度该分组的账号；${pool === 'river' ? 'River' : 'OpenDesign'} 号池的密钥请用本池的分组</span></div><div id="k-out"></div>`,
     buttons: [{ label: '关闭', value: 'c' }, { label: '创建', value: 'ok', primary: true, action: async () => {
       if (created) return false;
       created = await api('POST', '/api/client-keys', { name: $('#k-name').value, group: $('#k-group').value });
@@ -569,7 +593,7 @@ $('#btn-new-key').addEventListener('click', async () => {
 
 // ---- import keys (open account-import endpoint) ----
 async function loadImportKeys() {
-  const d = await api('GET', '/api/import-keys');
+  const d = await api('GET', withPool('/api/import-keys'));
   $('#import-url').textContent = location.origin + '/open/v1/accounts/import';
   $('#import-curl').textContent = `curl -X POST ${location.origin}/open/v1/accounts/import \\\n  -H 'Authorization: Bearer sk-odbimp-…' -H 'Content-Type: application/json' \\\n  -d '{"runtimeKey":"sk-amr-…","controlKey":"vela_ctrl_…","name":"账号A"}'`;
   $('#ik-table tbody').innerHTML = d.keys.map((k) => `<tr data-id="${esc(k.id)}">
@@ -613,7 +637,7 @@ $('#btn-refresh-ilog').addEventListener('click', () => loadImportLog().catch((e)
 $('#btn-new-import-key').addEventListener('click', async () => {
   let created = null;
   await modal({ title: '新建导入密钥',
-    body: `<div class="form"><label>名称</label><input id="ik-name" placeholder="signup-bot"><span class="hint">会写进导入账号的备注，便于追溯来源</span><label>默认分组</label><input id="ik-group" placeholder="default"><span class="hint">请求不带 group 时导入到该分组</span></div><div id="ik-out"></div>`,
+    body: `<div class="form"><label>名称</label><input id="ik-name" placeholder="signup-bot"><span class="hint">会写进导入账号的备注，便于追溯来源</span><label>默认分组</label><input id="ik-group" placeholder="${pool === 'river' ? 'river' : 'default'}" value="${pool === 'river' ? 'river' : 'default'}"><span class="hint">请求不带 group 时导入到该分组</span></div><div id="ik-out"></div>`,
     buttons: [{ label: '关闭', value: 'c' }, { label: '创建', value: 'ok', primary: true, action: async () => {
       if (created) return false;
       created = await api('POST', '/api/import-keys', { name: $('#ik-name').value, group: $('#ik-group').value });
@@ -857,7 +881,7 @@ async function loadSettings() {
   $('#price-holidays').value = (s.pricing.holidays || []).join(', ');
   renderPrices();
   $('#set-rev').textContent = '配置版本 ' + s.revision;
-  const ov = await api('GET', '/api/overview');
+  const ov = await api('GET', withPool('/api/overview'));
   $('#pv-group').innerHTML = (ov.groups.length ? ov.groups : ['default']).map((g) => `<option>${esc(g)}</option>`).join('');
 }
 $('#btn-save-settings').addEventListener('click', async () => {
@@ -875,7 +899,7 @@ $('#btn-default-rules').addEventListener('click', () => {
 $('#btn-preview').addEventListener('click', async () => {
   try {
     const r = await api('POST', '/api/workflow/preview', { group: $('#pv-group').value, model: $('#pv-model').value.trim() });
-    const accs = await api('GET', '/api/accounts');
+    const accs = await api('GET', withPool('/api/accounts'));
     const name = (id) => (accs.accounts.find((a) => a.id === id) || { name: id }).name;
     const ex = Object.entries(r.excluded);
     $('#pv-result').innerHTML = `<div><b>候选顺序：</b>${r.order.length ? r.order.map((id, i) => `${i + 1}. ${esc(name(id))}`).join('　') : '无'}</div>` +
@@ -943,12 +967,12 @@ function errorRow(e) {
     <td class="small">${esc(String(e.reason).slice(0, 160))}</td></tr>`;
 }
 async function loadLogs(kind, reset) {
-  if (!accountsCache.length) { try { accountsCache = (await api('GET', '/api/accounts')).accounts; } catch { /* ignore */ } }
+  if (!accountsCache.length) { try { accountsCache = (await api('GET', withPool('/api/accounts'))).accounts; } catch { /* ignore */ } }
   const p = LOG_PREFIX[kind];
   if (kind !== 'details') accountOptions($(`#${p}-account`));
   const st = logState[kind];
   if (reset) { st.cursor = ''; st.items = []; }
-  const q = new URLSearchParams({ limit: '50' });
+  const q = new URLSearchParams({ limit: '50', provider: pool });
   if (st.cursor) q.set('cursor', st.cursor);
   const add = (k, v) => { if (v) q.set(k, v); };
   add('accountId', $(`#${p}-account`).value);

@@ -295,9 +295,28 @@ func (s *Server) accountViews(cfg *config.Config) []accountView {
 	return out
 }
 
+// providerParam is the ?provider= pool filter ("" means no filter).
+func providerParam(r *http.Request) string {
+	switch p := r.URL.Query().Get("provider"); p {
+	case config.ProviderOpenDesign, config.ProviderRiver:
+		return p
+	}
+	return ""
+}
+
 func (s *Server) apiAccounts(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Get()
-	writeJSON(w, http.StatusOK, map[string]any{"revision": cfg.Revision, "accounts": s.accountViews(cfg)})
+	views := s.accountViews(cfg)
+	if p := providerParam(r); p != "" {
+		kept := views[:0]
+		for _, v := range views {
+			if providerOf(v.Provider) == p {
+				kept = append(kept, v)
+			}
+		}
+		views = kept
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revision": cfg.Revision, "accounts": views})
 }
 
 type accountInput struct {
@@ -814,7 +833,11 @@ func (s *Server) apiClientKeys(w http.ResponseWriter, r *http.Request) {
 		CreatedAt time.Time `json:"createdAt"`
 	}
 	out := []view{}
+	want := providerParam(r)
 	for _, k := range cfg.ClientKeys {
+		if want != "" && providerOf(cfg.GroupProvider(k.Group)) != want {
+			continue // a key whose group is empty counts as OpenDesign
+		}
 		out = append(out, view{k.ID, k.Name, k.Group, k.KeyPrefix, k.Key, k.Enabled, k.CreatedAt})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revision": cfg.Revision, "keys": out})
@@ -1058,6 +1081,16 @@ type windowTotal struct {
 func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Get()
 	views := s.accountViews(cfg)
+	want := providerParam(r)
+	if want != "" {
+		kept := views[:0]
+		for _, v := range views {
+			if providerOf(v.Provider) == want {
+				kept = append(kept, v)
+			}
+		}
+		views = kept
+	}
 	now := time.Now()
 	statusCount := map[string]int{}
 	groups := map[string]int{}
@@ -1107,6 +1140,9 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 		groupList = append(groupList, g)
 	}
 	for _, k := range cfg.ClientKeys {
+		if want != "" && providerOf(cfg.GroupProvider(k.Group)) != want {
+			continue
+		}
 		if _, ok := groups[k.Group]; !ok {
 			groups[k.Group] = 0
 			groupList = append(groupList, k.Group)
@@ -1123,10 +1159,19 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 		"authFailed":     authFailed,
 		"workspaces":     len(seenWS),
 		"bindings":       s.pool.BindingCount(),
-		"stats":          s.stats.Summary(),
+		"stats":          s.stats.SummaryFor(want),
 		"logsDropped":    s.logs.Dropped(),
 		"clientKeys":     len(cfg.ClientKeys),
+		"provider":       want,
 		"uptimeSec":      int64(time.Since(s.started).Seconds()),
 		"strategy":       cfg.Routing.Strategy,
 	})
+}
+
+// providerOf normalizes an account's stored provider (empty = OpenDesign).
+func providerOf(p string) string {
+	if p == "" {
+		return config.ProviderOpenDesign
+	}
+	return p
 }

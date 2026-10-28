@@ -43,6 +43,10 @@ textarea.code { width: 100%; resize: vertical; line-height: 1.45; }
 .side nav a { color: var(--text); padding: 8px 12px; border-radius: 8px; }
 .side nav a:hover { background: var(--line2); }
 .side nav a.active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+.pool-tabs { display: flex; gap: 6px; margin: -6px 0 18px; border-bottom: 1px solid var(--line); }
+.pool-tab { border: 0; background: transparent; color: var(--muted, #6b7280); font: inherit; font-weight: 600; padding: 9px 16px; cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.pool-tab:hover { color: var(--text); }
+.pool-tab.active { color: var(--accent); border-bottom-color: var(--accent); }
 .side-foot { margin-top: auto; display: flex; gap: 6px; flex-wrap: wrap; }
 main { padding: 22px 28px 60px; min-width: 0; }
 .page-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin-bottom: 16px; }

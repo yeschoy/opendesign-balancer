@@ -436,7 +436,17 @@ func (s *Server) stagedViews(cfg *config.Config) []stagedView {
 
 func (s *Server) apiStaging(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Get()
-	writeJSON(w, http.StatusOK, map[string]any{"revision": cfg.Revision, "items": s.stagedViews(cfg)})
+	items := s.stagedViews(cfg)
+	if want := providerParam(r); want != "" {
+		kept := items[:0]
+		for _, it := range items {
+			if config.ProviderForKey(it.stagedAccount.RuntimeKey) == want {
+				kept = append(kept, it)
+			}
+		}
+		items = kept
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revision": cfg.Revision, "items": items})
 }
 
 // applyStaged resolves a staged import. action "overwrite" replaces the keys
@@ -561,7 +571,11 @@ func (s *Server) apiImportKeys(w http.ResponseWriter, r *http.Request) {
 		CreatedAt time.Time `json:"createdAt"`
 	}
 	out := []view{}
+	want := providerParam(r)
 	for _, k := range cfg.ImportKeys {
+		if want != "" && providerOf(cfg.GroupProvider(k.Group)) != want {
+			continue
+		}
 		out = append(out, view{k.ID, k.Name, k.Group, k.KeyPrefix, k.Key, k.Enabled, k.CreatedAt})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"revision": cfg.Revision, "keys": out})

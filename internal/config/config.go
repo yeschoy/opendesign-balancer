@@ -71,6 +71,17 @@ func ValidRuntimeKey(key string) bool {
 	return strings.HasPrefix(key, "sk-") || strings.HasPrefix(key, RiverKeyPrefix)
 }
 
+// GroupProvider is the provider whose accounts group holds ("" when it has
+// none yet). Normalize keeps a group to one provider.
+func (c *Config) GroupProvider(group string) string {
+	for _, a := range c.Accounts {
+		if a.Group == group {
+			return a.Provider
+		}
+	}
+	return ""
+}
+
 // RuntimeBase is the inference endpoint account a is served from.
 func (c *Config) RuntimeBase(a Account) string {
 	if a.Provider == ProviderRiver {

@@ -44,17 +44,27 @@ func (r *ring) slot(m int64) *Bucket {
 	return b
 }
 
-type Stats struct {
-	mu      sync.Mutex
+// scope is one set of rings: everything, or one provider's share of it.
+type scope struct {
 	global  ring
 	account map[string]*ring
 	model   map[string]*ring
 	proxy   map[string]*ring
-	now     func() time.Time
+}
+
+func newScope() *scope {
+	return &scope{account: map[string]*ring{}, model: map[string]*ring{}, proxy: map[string]*ring{}}
+}
+
+type Stats struct {
+	mu   sync.Mutex
+	all  *scope
+	prov map[string]*scope // per provider (opendesign, river)
+	now  func() time.Time
 }
 
 func New() *Stats {
-	return &Stats{account: map[string]*ring{}, model: map[string]*ring{}, proxy: map[string]*ring{}, now: time.Now}
+	return &Stats{all: newScope(), prov: map[string]*scope{}, now: time.Now}
 }
 
 // maxModels bounds the per-model rings: model names come from clients.
@@ -66,6 +76,7 @@ const maxProxies = 200
 // Sample is one finished request.
 type Sample struct {
 	AccountID, Model string
+	Provider         string // opendesign | river; "" counts only in the overall view
 	Proxy            string // egress label: proxy host:port, or "direct"
 	Result           string // success | failed | client_cancelled
 	Input, Output    *int64
@@ -73,6 +84,32 @@ type Sample struct {
 	Prompt           int64 // total prompt tokens, cache hits included
 	Currency         string
 	Cost             float64
+}
+
+func slotOf(m map[string]*ring, key string, limit int) *ring {
+	r := m[key]
+	if r == nil && len(m) < limit {
+		r = &ring{}
+		m[key] = r
+	}
+	return r
+}
+
+func (sc *scope) record(m int64, d Bucket, x Sample) {
+	sc.global.slot(m).add(d)
+	if x.AccountID != "" {
+		slotOf(sc.account, x.AccountID, 1<<30).slot(m).add(d)
+	}
+	if x.Proxy != "" {
+		if r := slotOf(sc.proxy, x.Proxy, maxProxies); r != nil {
+			r.slot(m).add(d)
+		}
+	}
+	if x.Model != "" {
+		if r := slotOf(sc.model, x.Model, maxModels); r != nil {
+			r.slot(m).add(d)
+		}
+	}
 }
 
 // Record adds one finished request.
@@ -103,34 +140,14 @@ func (s *Stats) Record(x Sample) {
 			*y.dst = *y.p
 		}
 	}
-	s.global.slot(m).add(d)
-	if x.AccountID != "" {
-		r := s.account[x.AccountID]
-		if r == nil {
-			r = &ring{}
-			s.account[x.AccountID] = r
+	s.all.record(m, d, x)
+	if x.Provider != "" {
+		sc := s.prov[x.Provider]
+		if sc == nil {
+			sc = newScope()
+			s.prov[x.Provider] = sc
 		}
-		r.slot(m).add(d)
-	}
-	if x.Proxy != "" {
-		r := s.proxy[x.Proxy]
-		if r == nil && len(s.proxy) < maxProxies {
-			r = &ring{}
-			s.proxy[x.Proxy] = r
-		}
-		if r != nil {
-			r.slot(m).add(d)
-		}
-	}
-	if x.Model != "" {
-		r := s.model[x.Model]
-		if r == nil && len(s.model) < maxModels {
-			r = &ring{}
-			s.model[x.Model] = r
-		}
-		if r != nil {
-			r.slot(m).add(d)
-		}
+		sc.record(m, d, x)
 	}
 }
 
@@ -144,18 +161,47 @@ type Summary struct {
 	Generated time.Time         `json:"generated"`
 }
 
-func (s *Stats) Summary() Summary {
+func sumRing(r *ring, cut int64) (t Bucket) {
+	for _, b := range r {
+		if b.Minute > cut {
+			t.add(b)
+		}
+	}
+	return t
+}
+
+func sumMap(src map[string]*ring, cut int64) map[string]Bucket {
+	out := map[string]Bucket{}
+	for k, r := range src {
+		if t := sumRing(r, cut); t.Requests > 0 {
+			out[k] = t
+		}
+	}
+	return out
+}
+
+// Summary is the overall view.
+func (s *Stats) Summary() Summary { return s.SummaryFor("") }
+
+// SummaryFor is the view of one provider's requests ("" for all of them).
+func (s *Stats) SummaryFor(provider string) Summary {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	sc := s.all
+	if provider != "" {
+		if sc = s.prov[provider]; sc == nil {
+			sc = newScope()
+		}
+	}
 	now := s.now()
 	m := now.Unix() / 60
 	cut := m - 1440
 	hourStart := (m/60 - 23) * 60
-	out := Summary{Hourly: make([]Bucket, 24), Accounts: map[string]Bucket{}, Models: map[string]Bucket{}, Proxies: map[string]Bucket{}, Generated: now.UTC()}
+	out := Summary{Hourly: make([]Bucket, 24), Generated: now.UTC()}
 	for i := range out.Hourly {
 		out.Hourly[i].Minute = hourStart + int64(i)*60
 	}
-	for _, b := range s.global {
+	for _, b := range sc.global {
 		if b.Minute <= cut || b.Requests == 0 {
 			continue
 		}
@@ -167,39 +213,9 @@ func (s *Stats) Summary() Summary {
 			out.Hourly[h].add(b)
 		}
 	}
-	for id, r := range s.account {
-		var t Bucket
-		for _, b := range r {
-			if b.Minute > cut {
-				t.add(b)
-			}
-		}
-		if t.Requests > 0 {
-			out.Accounts[id] = t
-		}
-	}
-	for name, r := range s.model {
-		var t Bucket
-		for _, b := range r {
-			if b.Minute > cut {
-				t.add(b)
-			}
-		}
-		if t.Requests > 0 {
-			out.Models[name] = t
-		}
-	}
-	for name, r := range s.proxy {
-		var t Bucket
-		for _, b := range r {
-			if b.Minute > cut {
-				t.add(b)
-			}
-		}
-		if t.Requests > 0 {
-			out.Proxies[name] = t
-		}
-	}
+	out.Accounts = sumMap(sc.account, cut)
+	out.Models = sumMap(sc.model, cut)
+	out.Proxies = sumMap(sc.proxy, cut)
 	return out
 }
 
@@ -208,12 +224,12 @@ type Export struct {
 	Accounts map[string][]Bucket `json:"accounts"`
 	Models   map[string][]Bucket `json:"models,omitempty"`
 	Proxies  map[string][]Bucket `json:"proxies,omitempty"`
+	// Providers is each provider's share. Files written before it existed
+	// have none: all of that traffic was OpenDesign.
+	Providers map[string]Export `json:"providers,omitempty"`
 }
 
-func (s *Stats) Export() Export {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cut := s.now().Unix()/60 - 1440
+func (sc *scope) export(cut int64) Export {
 	pick := func(r *ring) []Bucket {
 		var out []Bucket
 		for _, b := range r {
@@ -223,20 +239,34 @@ func (s *Stats) Export() Export {
 		}
 		return out
 	}
-	e := Export{Global: pick(&s.global), Accounts: map[string][]Bucket{}, Models: map[string][]Bucket{}, Proxies: map[string][]Bucket{}}
-	for id, r := range s.account {
+	e := Export{Global: pick(&sc.global), Accounts: map[string][]Bucket{}, Models: map[string][]Bucket{}, Proxies: map[string][]Bucket{}}
+	for id, r := range sc.account {
 		if l := pick(r); len(l) > 0 {
 			e.Accounts[id] = l
 		}
 	}
-	for name, r := range s.model {
+	for name, r := range sc.model {
 		if l := pick(r); len(l) > 0 {
 			e.Models[name] = l
 		}
 	}
-	for name, r := range s.proxy {
+	for name, r := range sc.proxy {
 		if l := pick(r); len(l) > 0 {
 			e.Proxies[name] = l
+		}
+	}
+	return e
+}
+
+func (s *Stats) Export() Export {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cut := s.now().Unix()/60 - 1440
+	e := s.all.export(cut)
+	if len(s.prov) > 0 {
+		e.Providers = map[string]Export{}
+		for p, sc := range s.prov {
+			e.Providers[p] = sc.export(cut)
 		}
 	}
 	return e
@@ -251,42 +281,58 @@ func withPrompt(b Bucket) Bucket {
 	return b
 }
 
+func loadRing(l []Bucket) *ring {
+	r := &ring{}
+	for _, b := range l {
+		r[b.Minute%1440] = withPrompt(b)
+	}
+	return r
+}
+
+func (sc *scope) load(e Export) {
+	for _, b := range e.Global {
+		sc.global[b.Minute%1440] = withPrompt(b)
+	}
+	for id, l := range e.Accounts {
+		sc.account[id] = loadRing(l)
+	}
+	for name, l := range e.Models {
+		if len(sc.model) >= maxModels {
+			break
+		}
+		sc.model[name] = loadRing(l)
+	}
+	for name, l := range e.Proxies {
+		if len(sc.proxy) >= maxProxies {
+			break
+		}
+		sc.proxy[name] = loadRing(l)
+	}
+}
+
 func (s *Stats) Import(e Export) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	load := func(l []Bucket) *ring {
-		r := &ring{}
-		for _, b := range l {
-			r[b.Minute%1440] = withPrompt(b)
-		}
-		return r
+	s.all.load(e)
+	if len(e.Providers) == 0 {
+		// written before providers existed: everything was OpenDesign
+		sc := newScope()
+		sc.load(e)
+		s.prov["opendesign"] = sc
+		return
 	}
-	for _, b := range e.Global {
-		s.global[b.Minute%1440] = withPrompt(b)
-	}
-	for id, l := range e.Accounts {
-		s.account[id] = load(l)
-	}
-	for name, l := range e.Models {
-		if len(s.model) >= maxModels {
-			break
-		}
-		s.model[name] = load(l)
-	}
-	s.importProxies(e, load)
-}
-
-func (s *Stats) importProxies(e Export, load func([]Bucket) *ring) {
-	for name, l := range e.Proxies {
-		if len(s.proxy) >= maxProxies {
-			break
-		}
-		s.proxy[name] = load(l)
+	for p, pe := range e.Providers {
+		sc := newScope()
+		sc.load(pe)
+		s.prov[p] = sc
 	}
 }
 
 func (s *Stats) Forget(id string) {
 	s.mu.Lock()
-	delete(s.account, id)
+	delete(s.all.account, id)
+	for _, sc := range s.prov {
+		delete(sc.account, id)
+	}
 	s.mu.Unlock()
 }
