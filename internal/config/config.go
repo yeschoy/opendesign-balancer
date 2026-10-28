@@ -71,6 +71,14 @@ func ValidRuntimeKey(key string) bool {
 	return strings.HasPrefix(key, "sk-") || strings.HasPrefix(key, RiverKeyPrefix)
 }
 
+// RulesFor are the error and retry rules of an account's pool.
+func (c *Config) RulesFor(provider string) ([]rules.ErrorRule, []rules.RetryRule) {
+	if provider == ProviderRiver {
+		return c.RiverErrorRules, c.RiverRetryRules
+	}
+	return c.ErrorRules, c.RetryRules
+}
+
 // GroupProvider is the provider whose accounts group holds ("" when it has
 // none yet). Normalize keeps a group to one provider.
 func (c *Config) GroupProvider(group string) string {
@@ -194,19 +202,22 @@ type Logs struct {
 }
 
 type Config struct {
-	Version    int               `json:"version"`
-	Revision   int64             `json:"revision"`
-	Upstream   Upstream          `json:"upstream"`
-	Admin      Admin             `json:"admin"`
-	ClientKeys []ClientKey       `json:"clientKeys"`
-	ImportKeys []ImportKey       `json:"importKeys"`
-	Accounts   []Account         `json:"accounts"`
-	Routing    Routing           `json:"routing"`
-	Quota      Quota             `json:"quota"`
-	ErrorRules []rules.ErrorRule `json:"errorRules"`
-	RetryRules []rules.RetryRule `json:"retryRules"`
-	Logs       Logs              `json:"logs"`
-	Pricing    pricing.Config    `json:"pricing"`
+	Version    int         `json:"version"`
+	Revision   int64       `json:"revision"`
+	Upstream   Upstream    `json:"upstream"`
+	Admin      Admin       `json:"admin"`
+	ClientKeys []ClientKey `json:"clientKeys"`
+	ImportKeys []ImportKey `json:"importKeys"`
+	Accounts   []Account   `json:"accounts"`
+	Routing    Routing     `json:"routing"`
+	Quota      Quota       `json:"quota"`
+	// ErrorRules / RetryRules are the OpenDesign pool's; River has its own.
+	ErrorRules      []rules.ErrorRule `json:"errorRules"`
+	RetryRules      []rules.RetryRule `json:"retryRules"`
+	RiverErrorRules []rules.ErrorRule `json:"riverErrorRules"`
+	RiverRetryRules []rules.RetryRule `json:"riverRetryRules"`
+	Logs            Logs              `json:"logs"`
+	Pricing         pricing.Config    `json:"pricing"`
 }
 
 func Default() *Config {
@@ -230,11 +241,13 @@ func Default() *Config {
 			FirstEventSec: 120, IdleSec: 360, HeartbeatSec: 25, RequestSec: 900,
 			MaxBodyMB: 64, ModelsCacheSec: 600, DirectMaxConns: 512, ProxyMaxConns: 32,
 		},
-		Quota:      Quota{Enabled: true, IntervalSec: 60, Concurrency: 2, StaleSec: 900},
-		ErrorRules: rules.DefaultErrorRules(),
-		RetryRules: rules.DefaultRetryRules(),
-		Pricing:    pricing.Config{Models: pricing.Defaults(), Holidays: []string{}},
-		Logs:       Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100, MaxDetails: 500, DetailBodyKB: 6144},
+		Quota:           Quota{Enabled: true, IntervalSec: 60, Concurrency: 2, StaleSec: 900},
+		ErrorRules:      rules.DefaultErrorRules(),
+		RetryRules:      rules.DefaultRetryRules(),
+		RiverErrorRules: rules.DefaultRiverErrorRules(),
+		RiverRetryRules: rules.DefaultRetryRules(),
+		Pricing:         pricing.Config{Models: pricing.Defaults(), Holidays: []string{}},
+		Logs:            Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100, MaxDetails: 500, DetailBodyKB: 6144},
 	}
 }
 
@@ -324,6 +337,20 @@ func (c *Config) Normalize() error {
 	}
 	if c.RetryRules == nil {
 		c.RetryRules = []rules.RetryRule{}
+	}
+	// a config written before the River pool has no River rules: start from
+	// the defaults (an explicit empty list stays empty)
+	if c.RiverErrorRules == nil {
+		c.RiverErrorRules = rules.DefaultRiverErrorRules()
+	}
+	if c.RiverRetryRules == nil {
+		c.RiverRetryRules = rules.DefaultRetryRules()
+	}
+	if err := rules.ValidateErrorRules(c.RiverErrorRules); err != nil {
+		return fmt.Errorf("river: %w", err)
+	}
+	if err := rules.ValidateRetryRules(c.RiverRetryRules); err != nil {
+		return fmt.Errorf("river: %w", err)
 	}
 	if err := rules.ValidateErrorRules(c.ErrorRules); err != nil {
 		return err

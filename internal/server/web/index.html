@@ -146,11 +146,11 @@
           <span class="hint">高峰倍数 &gt; 1 的模型（DeepSeek）在北京时间工作日 9-12、14-18 按倍数计费；这里填法定节假日（YYYY-MM-DD，逗号分隔），当天按空闲价。长上下文：提示 token 达到阈值时整个请求按“长”价。标注“请核对”的价格不是从厂商官方页读到的。</span></div>
       </div>
       <div class="panel">
-        <div class="head-row"><h2>错误规则 <span class="muted small">按顺序匹配，首条命中生效；未命中只记降级样本，不会冷却</span></h2>
+        <div class="head-row"><h2>错误规则 <span class="badge" id="rules-pool"></span> <span class="muted small">按顺序匹配，首条命中生效；未命中只记降级样本，不会冷却</span></h2>
           <div class="actions"><button class="btn ghost small" id="btn-default-rules">恢复默认规则</button><button class="btn small" id="btn-add-error-rule">添加规则</button></div></div>
         <div class="table-wrap"><table class="table rules-table" id="rules-error"><thead><tr><th>#</th><th>规则</th><th>命中条件</th><th>处理</th><th></th></tr></thead><tbody></tbody></table></div>
         <p id="rules-error-empty" class="empty hidden">没有错误规则：任何失败都只记降级样本。</p>
-        <div class="head-row mt"><h2>重试规则 <span class="muted small">命中后停止换号，原样返回</span></h2>
+        <div class="head-row mt"><h2>重试规则 <span class="muted small">命中后停止换号，原样返回；错误规则和重试规则每个号池各一套，上方标签切换</span></h2>
           <div class="actions"><button class="btn small" id="btn-add-retry-rule">添加规则</button></div></div>
         <div class="table-wrap"><table class="table rules-table" id="rules-retry"><thead><tr><th>#</th><th>规则</th><th>命中条件</th><th></th></tr></thead><tbody></tbody></table></div>
         <p id="rules-retry-empty" class="empty hidden">没有重试规则：失败后会一直换号直到用完重试次数。</p>

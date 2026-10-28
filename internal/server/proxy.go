@@ -598,11 +598,12 @@ func (s *Server) evaluate(cfg *config.Config, acct config.Account, model string,
 				return ev
 			}
 		}
-		retry := rules.MatchRetry(cfg.RetryRules, st, matchText, res.header)
+		errRules, retRules := cfg.RulesFor(acct.Provider)
+		retry := rules.MatchRetry(retRules, st, matchText, res.header)
 		if retry != nil {
 			el.RetryRuleID, el.RetryDecision = retry.ID, retry.Decision
 		}
-		rule := rules.MatchError(cfg.ErrorRules, st, redacted, res.header)
+		rule := rules.MatchError(errRules, st, redacted, res.header)
 		if c, r := membershipLimits(matchText); c > 0 || r > 0 {
 			s.pool.Learn(acct.ID, c, r)
 		}

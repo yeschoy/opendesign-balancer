@@ -868,7 +868,7 @@ $('#btn-add-price').addEventListener('click', () => { priceRows.unshift({ model:
 $('#btn-default-pricing').addEventListener('click', () => { priceRows = clone(settingsCache.defaults.pricing); renderPrices(); toast('已填入默认价格，保存后生效'); });
 
 async function loadSettings() {
-  settingsCache = await api('GET', '/api/settings');
+  settingsCache = await api('GET', withPool('/api/settings'));
   const s = settingsCache.settings;
   renderForm($('#form-routing'), ROUTING_FIELDS, s.routing, 'rt');
   renderForm($('#form-quota'), QUOTA_FIELDS, s.quota, 'qt');
@@ -876,6 +876,7 @@ async function loadSettings() {
   $('#rt-strategy').addEventListener('change', (e) => { $('#rt-strategy-hint').textContent = STRATEGY_HINTS[e.target.value] || ''; });
   errRules = clone(s.errorRules || []);
   retRules = clone(s.retryRules || []);
+  $('#rules-pool').textContent = POOL_LABEL[pool] + ' 号池';
   renderRules();
   priceRows = clone(s.pricing.models || []);
   $('#price-holidays').value = (s.pricing.holidays || []).join(', ');
@@ -888,7 +889,7 @@ $('#btn-save-settings').addEventListener('click', async () => {
   const s = settingsCache.settings;
   const errorRules = errRules, retryRules = retRules;
   const body = { revision: s.revision, upstream: s.upstream, routing: readForm(ROUTING_FIELDS, 'rt', s.routing), quota: readForm(QUOTA_FIELDS, 'qt', s.quota), logs: readForm(LOG_FIELDS, 'lg', s.logs), pricing: readPricing(), errorRules, retryRules };
-  try { await api('PUT', '/api/settings', body); toast('已保存'); loadSettings(); } catch (e) { toast(e.message); }
+  try { await api('PUT', withPool('/api/settings'), body); toast('已保存'); loadSettings(); } catch (e) { toast(e.message); }
 });
 $('#btn-default-rules').addEventListener('click', () => {
   errRules = clone(settingsCache.defaults.errorRules);

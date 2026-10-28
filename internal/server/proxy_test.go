@@ -17,6 +17,7 @@ import (
 
 	"opendesign-balancer/internal/config"
 	"opendesign-balancer/internal/quota"
+	"opendesign-balancer/internal/rules"
 )
 
 type mockUpstream struct {
@@ -749,5 +750,32 @@ func TestRiverPoolOnlyOpenAIEndpoints(t *testing.T) {
 		if resp.StatusCode != http.StatusOK {
 			t.Fatalf("%s: status %d, want 200", path, resp.StatusCode)
 		}
+	}
+}
+
+// Each pool judges failures by its own rules: a 402 cools a River account but
+// means nothing special to an OpenDesign one.
+func TestRulesAreSeparatePerPool(t *testing.T) {
+	c := config.Default()
+	od, _ := c.RulesFor(config.ProviderOpenDesign)
+	rv, _ := c.RulesFor(config.ProviderRiver)
+	has := func(rs []rules.ErrorRule, id string) bool {
+		for _, r := range rs {
+			if r.ID == id {
+				return true
+			}
+		}
+		return false
+	}
+	if !has(rv, "river-insufficient-balance") || has(od, "river-insufficient-balance") {
+		t.Fatal("river rules missing or leaked into opendesign")
+	}
+	if !has(od, "model-window-limit") || has(rv, "model-window-limit") {
+		t.Fatal("opendesign rules missing or leaked into river")
+	}
+	c.RiverErrorRules = nil
+	c.Accounts = nil
+	if err := c.Normalize(); err != nil || len(c.RiverErrorRules) == 0 {
+		t.Fatalf("river rules not defaulted: %v", err)
 	}
 }

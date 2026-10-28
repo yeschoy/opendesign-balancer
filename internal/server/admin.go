@@ -932,10 +932,17 @@ type settingsDoc struct {
 
 func (s *Server) apiSettings(w http.ResponseWriter, r *http.Request) {
 	c := s.cfg.Get()
+	prov := providerOf(providerParam(r)) // the pool whose rules are shown
+	errRules, retRules := c.RulesFor(prov)
+	defErr := rules.DefaultErrorRules()
+	if prov == config.ProviderRiver {
+		defErr = rules.DefaultRiverErrorRules()
+	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"settings":   settingsDoc{c.Revision, c.Upstream, c.Routing, c.Quota, c.Logs, c.Pricing, c.ErrorRules, c.RetryRules},
+		"settings":   settingsDoc{c.Revision, c.Upstream, c.Routing, c.Quota, c.Logs, c.Pricing, errRules, retRules},
+		"provider":   prov,
 		"strategies": config.Strategies,
-		"defaults":   map[string]any{"errorRules": rules.DefaultErrorRules(), "retryRules": rules.DefaultRetryRules(), "pricing": pricing.Defaults()},
+		"defaults":   map[string]any{"errorRules": defErr, "retryRules": rules.DefaultRetryRules(), "pricing": pricing.Defaults()},
 	})
 }
 
@@ -945,10 +952,15 @@ func (s *Server) apiSaveSettings(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusBadRequest, err)
 		return
 	}
+	prov := providerOf(providerParam(r)) // which pool's rules this save replaces
 	cfg, err := s.cfg.Update(in.Revision, func(c *config.Config) error {
 		c.Upstream, c.Routing, c.Quota, c.Logs = in.Upstream, in.Routing, in.Quota, in.Logs
 		c.Pricing = in.Pricing
-		c.ErrorRules, c.RetryRules = in.ErrorRules, in.RetryRules
+		if prov == config.ProviderRiver {
+			c.RiverErrorRules, c.RiverRetryRules = in.ErrorRules, in.RetryRules
+		} else {
+			c.ErrorRules, c.RetryRules = in.ErrorRules, in.RetryRules
+		}
 		return nil
 	})
 	if err != nil {

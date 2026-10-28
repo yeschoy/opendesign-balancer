@@ -100,14 +100,6 @@ func DefaultErrorRules() []ErrorRule {
 		{ID: "runtime-key-invalid", Scope: ScopeAccount, Action: ActionHardQuarantine,
 			When: Match{Statuses: []int{401}, BodyContains: []string{"invalid_api_key", "api key not found", "unauthenticated", "auth_required"}},
 			Note: "sk-amr 运行密钥失效，需要重新设备授权"},
-		{ID: "river-auth-failed", Scope: ScopeAccount, Action: ActionCooldown, DownstreamStatus: 502,
-			When:  Match{Statuses: []int{401}},
-			Reset: &Reset{Fallback: "30m", Max: "6h", Escalate: true},
-			Note:  "其他 401（如 River rv_ 密钥被撤销）：账号冷却，逐次翻倍，换号"},
-		{ID: "payment-required", Scope: ScopeFunding, Action: ActionCooldown, RefreshQuota: true, DownstreamStatus: 503,
-			When:  Match{Statuses: []int{402}},
-			Reset: &Reset{Fallback: "10m", Max: "6h", Escalate: true},
-			Note:  "HTTP 402：余额不足（River：去 Console 充值），逐次翻倍冷却"},
 		{ID: "model-window-limit", Scope: ScopeModel, Action: ActionCooldown, DownstreamStatus: 429,
 			When:  Match{BodyContains: []string{"model_limit_exceeded", "hour usage limit"}},
 			Reset: &Reset{Header: "Retry-After", Format: "retry-after", BodyAfter: []string{"try again after"}, Fallback: "30m", Max: "8d"},
@@ -136,6 +128,30 @@ func DefaultErrorRules() []ErrorRule {
 			When:  Match{Statuses: []int{403}},
 			Reset: &Reset{Fallback: "5m"},
 			Note:  "账号被拒绝访问"},
+	}
+}
+
+// DefaultRiverErrorRules are River's (docs.river.ai/guides/inference-limits):
+// 401/403 key or model access, 402 console balance, 429/503 back off and
+// honour Retry-After, other 5xx transient. Its keys have no control plane,
+// so a balance refusal can only be learned from the error itself.
+func DefaultRiverErrorRules() []ErrorRule {
+	return []ErrorRule{
+		{ID: "river-key-invalid", Scope: ScopeAccount, Action: ActionHardQuarantine, DownstreamStatus: 502,
+			When: Match{Statuses: []int{401}},
+			Note: "rv_ 密钥无效或已撤销，需要人工处理（换 key 后点“恢复”）"},
+		{ID: "river-insufficient-balance", Scope: ScopeAccount, Action: ActionCooldown, DownstreamStatus: 503,
+			When:  Match{Statuses: []int{402}},
+			Reset: &Reset{Fallback: "10m", Max: "6h", Escalate: true},
+			Note:  "余额不足（去 River Console 充值）：整号冷却，10 分钟起逐次翻倍，最长 6 小时，成功一次清零"},
+		{ID: "river-rate-limited", Scope: ScopeAccount, Action: ActionCooldown,
+			When:  Match{Statuses: []int{429, 503}},
+			Reset: &Reset{Header: "Retry-After", Format: "retry-after", Fallback: "30s", Max: "5m"},
+			Note:  "限流或服务繁忙：按 Retry-After 冷却，换号"},
+		{ID: "river-forbidden", Scope: ScopeAccount, Action: ActionCooldown, DownstreamStatus: 503,
+			When:  Match{Statuses: []int{403}},
+			Reset: &Reset{Fallback: "5m"},
+			Note:  "账号或模型无访问权限"},
 	}
 }
 
