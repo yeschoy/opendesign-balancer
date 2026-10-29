@@ -69,10 +69,11 @@ docker compose up -d --build
 - 冷却规则独立一套（`ollamaErrorRules`）：401 `invalid credentials` 隔离换 key，403 账号停用隔离，429 按 `Retry-After` 冷却，500/502/503/504 短暂冷却换号。已有实例需在「路由设置 → Ollama 号池」点「恢复默认规则」再保存。
 - `/v1/models` 原样透传：Ollama 云端的模型目录对所有 key 相同（换个错误 key 也返回 200），不能当套餐依据，所以不做按账号裁剪；自建服务的列表则是本机已 pull 的模型。
 - 分组：不指定分组时进 `ollama` 组，各池之间不混放。下游密钥填 `ollama` 分组（new-api 里再建一个 OpenAI/Claude 渠道指向本服务）。
-- **三个池在三件事上完全独立**，互不借、互不回退：
+- **三个池在这四件事上完全独立**，互不借、互不回退：
   - **号池**：`default` / `river` / `ollama` 三个分组各属一个池，一个分组只放同一种账号。自定义分组跟着第一把声明了池的密钥走，归属一旦确定就不能再改。
   - **下游密钥**：密钥自己记着 `provider`，所以池里还没有账号时它也不会漂到别的标签下；密钥只能在**自己池的分组**之间移动，想换池请新建密钥（`group "river" 属于 river 号池，这把密钥属于 ollama 号池` 这样的报错就是被拦下了）。
   - **错误规则**：`errorRules` / `retryRules`、`riverErrorRules` / `riverRetryRules`、`ollamaErrorRules` / `ollamaRetryRules` 三套独立，设置页只读写当前标签的一套；三套默认值也各不相同（重试规则 id 分别是 `bad-request`、`river-bad-request`、`ollama-bad-request`）。改一个池的规则不会动到另外两个池。
+  - **导入记录**：每条记录记着自己导入进哪个池，`GET /api/import-log?provider=` 按池过滤，「下游密钥」页只显示当前标签那个池的记录。记录上限也按池算（每池最近 1000 条），一个池的导入刷屏不会把另一个池的历史挤掉。
 - 模型名带 tag，形如 `gpt-oss:20b`、`gemma4:31b`、`kimi-k2.7-code`；价格表按同样写法配置才会算费用。
 
 ## 下游接口

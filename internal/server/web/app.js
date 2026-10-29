@@ -681,7 +681,8 @@ async function loadImportKeys() {
   await loadImportLog();
 }
 async function loadImportLog() {
-  const d = await api('GET', '/api/import-log');
+  // the console shows one pool at a time: each tab lists only its own imports
+  const d = await api('GET', '/api/import-log?provider=' + encodeURIComponent(pool));
   const items = d.items || [];
   const n = (v) => v ? num(v) : '<span class="muted">0</span>';
   $('#ilog-table tbody').innerHTML = items.map((it) => `<tr>

@@ -267,7 +267,7 @@ func (s *Server) handleOpenImport(w http.ResponseWriter, r *http.Request) {
 		apiError(w, http.StatusUnauthorized, errors.New("invalid or missing import key"))
 		return
 	}
-	rec := importRecord{Source: "open", ImportKey: importKeyName(ik), ImportKeyID: ik.ID}
+	rec := importRecord{Source: "open", ImportKey: importKeyName(ik), ImportKeyID: ik.ID, Provider: importKeyPool(s.cfg.Get(), ik)}
 	var in importRequest
 	if err := readBody(r, &in); err != nil {
 		rec.Status, rec.Error = http.StatusBadRequest, err.Error()

@@ -214,7 +214,7 @@ func TestImportLogRecordsCalls(t *testing.T) {
 	if st, _ := e.openImport(testImportKey, "not an object"); st != 400 {
 		t.Fatalf("bad body: %d", st)
 	}
-	recs := e.srv.imports.recent(10)
+	recs := e.srv.imports.recent(10, "")
 	if len(recs) != 2 {
 		t.Fatalf("records = %d, want 2 (401 not recorded): %+v", len(recs), recs)
 	}
@@ -231,7 +231,7 @@ func TestImportLogRecordsCalls(t *testing.T) {
 		t.Fatalf("ips: batch %s/%s bad %s/%s", batch.IP, batch.Peer, bad.IP, bad.Peer)
 	}
 	reloaded, err := loadImportLog(importLogPath(e.srv.dataDir))
-	if err != nil || len(reloaded.recent(10)) != 2 || reloaded.recent(1)[0].ID != bad.ID {
+	if err != nil || len(reloaded.recent(10, "")) != 2 || reloaded.recent(1, "")[0].ID != bad.ID {
 		t.Fatalf("reload: %v %+v", err, reloaded)
 	}
 }
@@ -239,9 +239,9 @@ func TestImportLogRecordsCalls(t *testing.T) {
 func TestImportLogCap(t *testing.T) {
 	l := &importLog{path: t.TempDir() + "/import-log.json"}
 	for i := 0; i < maxImportLog+5; i++ {
-		l.add(importRecord{ID: strconv.Itoa(i)})
+		l.add(importRecord{ID: strconv.Itoa(i), Provider: config.ProviderOpenDesign})
 	}
-	if got := l.recent(maxImportLog * 2); len(got) != maxImportLog || got[0].ID != strconv.Itoa(maxImportLog+4) || got[len(got)-1].ID != "5" {
+	if got := l.recent(maxImportLog*2, ""); len(got) != maxImportLog || got[0].ID != strconv.Itoa(maxImportLog+4) || got[len(got)-1].ID != "5" {
 		t.Fatalf("cap: len %d first %s last %s", len(got), got[0].ID, got[len(got)-1].ID)
 	}
 }
@@ -286,7 +286,7 @@ func TestImportLogRecordsConsoleImport(t *testing.T) {
 	if st := post("sk-amr-c3\nno-key-here"); st != 400 {
 		t.Fatalf("bad line: %d", st)
 	}
-	recs := e.srv.imports.recent(10)
+	recs := e.srv.imports.recent(10, "")
 	if len(recs) != 2 {
 		t.Fatalf("records = %d", len(recs))
 	}
@@ -295,5 +295,85 @@ func TestImportLogRecordsConsoleImport(t *testing.T) {
 	}
 	if r := recs[0]; r.Total != 2 || r.Added != 0 || r.Failed != 1 || r.Status != 400 || r.Error == "" {
 		t.Fatalf("rejected record: %+v", r)
+	}
+}
+
+// Every record is filed under the pool it imported into, the console lists one
+// pool at a time, and a pool's history never evicts another pool's records.
+func TestImportLogIsolatedPerPool(t *testing.T) {
+	e := newImportEnv(t)
+	// an import key of the Ollama pool, and one of the River pool
+	_, _ = e.srv.cfg.Update(-1, func(c *config.Config) error {
+		c.ImportKeys = append(c.ImportKeys,
+			config.ImportKey{ID: "ik-oll", Name: "oll-bot", Group: "ollama", Provider: config.ProviderOllama, KeyHash: config.HashKey("sk-odbimp-oll-key"), KeyPrefix: "x", Enabled: true},
+			config.ImportKey{ID: "ik-rv", Name: "rv-bot", Group: "river", Provider: config.ProviderRiver, KeyHash: config.HashKey("sk-odbimp-rv-key"), KeyPrefix: "x", Enabled: true})
+		return nil
+	})
+	if st, _ := e.openImport(testImportKey, map[string]any{"runtimeKey": "sk-amr-p1"}); st != 200 {
+		t.Fatalf("opendesign import: %d", st)
+	}
+	if st, _ := e.openImport("sk-odbimp-rv-key", map[string]any{"runtimeKey": "rv_p1"}); st != 200 {
+		t.Fatalf("river import: %d", st)
+	}
+	if st, _ := e.openImport("sk-odbimp-oll-key", map[string]any{"runtimeKey": "opaque-ollama-1"}); st != 200 {
+		t.Fatalf("ollama import: %d", st)
+	}
+	for _, pool := range []string{config.ProviderOpenDesign, config.ProviderRiver, config.ProviderOllama} {
+		recs := e.srv.imports.recent(10, pool)
+		if len(recs) != 1 || recs[0].Provider != pool {
+			t.Fatalf("%s pool sees %+v", pool, recs)
+		}
+		if recs[0].Added != 1 {
+			t.Fatalf("%s pool record: %+v", pool, recs[0])
+		}
+	}
+
+	// the cap is per pool: filling one pool to maxImportLog leaves the others whole
+	l := &importLog{path: t.TempDir() + "/import-log.json"}
+	l.add(importRecord{ID: "keep", Provider: config.ProviderOllama})
+	for i := 0; i < maxImportLog+3; i++ {
+		l.add(importRecord{ID: strconv.Itoa(i), Provider: config.ProviderRiver})
+	}
+	if got := l.recent(10, config.ProviderRiver); len(got) != 10 || got[0].ID != strconv.Itoa(maxImportLog+2) {
+		t.Fatalf("river newest: %+v", got)
+	}
+	if got := l.recent(maxImportLog*2, config.ProviderRiver); len(got) != maxImportLog || got[len(got)-1].ID != "3" {
+		t.Fatalf("river cap: len %d last %s", len(got), got[len(got)-1].ID)
+	}
+	if got := l.recent(10, config.ProviderOllama); len(got) != 1 || got[0].ID != "keep" {
+		t.Fatalf("ollama record evicted by river traffic: %+v", got)
+	}
+}
+
+// The console's import log is per pool: ?provider= keeps each pool's tab to
+// its own imports.
+func TestImportLogEndpointFiltersByPool(t *testing.T) {
+	e := newImportEnv(t)
+	e.srv.recordImport(httptest.NewRequest(http.MethodPost, "/x", nil), importRecord{Source: "console", Group: "default", Total: 1})
+	e.srv.recordImport(httptest.NewRequest(http.MethodPost, "/x", nil), importRecord{Source: "console", Group: "ollama", Provider: config.ProviderOllama, Total: 2})
+
+	get := func(q string) []map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "/api/import-log"+q, nil)
+		rec := httptest.NewRecorder()
+		e.srv.apiImportLog(rec, req)
+		var out struct {
+			Items []map[string]any `json:"items"`
+		}
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatalf("%s: %v", q, err)
+		}
+		return out.Items
+	}
+	if items := get(""); len(items) != 2 {
+		t.Fatalf("unfiltered: %d", len(items))
+	}
+	if items := get("?provider=ollama"); len(items) != 1 || items[0]["provider"] != "ollama" || items[0]["total"] != float64(2) {
+		t.Fatalf("ollama: %+v", items)
+	}
+	if items := get("?provider=opendesign"); len(items) != 1 || items[0]["group"] != "default" {
+		t.Fatalf("opendesign: %+v", items)
+	}
+	if items := get("?provider=river"); len(items) != 0 {
+		t.Fatalf("river must be empty: %+v", items)
 	}
 }
