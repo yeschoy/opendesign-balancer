@@ -250,6 +250,20 @@ func ollamaPath(p string) bool {
 	return false
 }
 
+// modalPath: what a Modal Shared Endpoint serves — OpenAI Chat Completions,
+// OpenAI Responses and Anthropic Messages all at one host
+// (inference.<region>.modal.direct). Embeddings exist only on Endpoint types
+// this pool does not schedule, and the path answers 404 without one, so it is
+// left out and refused locally like River's.
+func modalPath(p string) bool {
+	for _, base := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
+		if p == base || strings.HasPrefix(p, base+"/") {
+			return true
+		}
+	}
+	return false
+}
+
 // poolPathOK says whether an account's pool serves the path.
 func poolPathOK(provider, path string) bool {
 	switch provider {
@@ -257,6 +271,8 @@ func poolPathOK(provider, path string) bool {
 		return riverPath(path)
 	case config.ProviderOllama:
 		return ollamaPath(path)
+	case config.ProviderModal:
+		return modalPath(path)
 	}
 	return true
 }
@@ -459,7 +475,7 @@ func (s *Server) handleProxy(w http.ResponseWriter, r *http.Request) {
 		rec.AccountID, rec.AccountName, rec.SelectionReason, rec.Overflow = acct.ID, acct.Name, d.Reason, d.Overflow
 		rec.Proxy = egressLabel(acct.ProxyURL)
 
-		res = s.attempt(w, r, cfg, lease, body, proto, rec, i+1, start, ck.Group)
+		res = s.attempt(w, r, cfg, lease, body, proto, rec, i+1, start, ck.Group, ident)
 		lease.Release()
 		att := attemptLog{Account: acct.ID, AccountName: acct.Name, Status: res.status, Ms: res.ms, Egress: "direct", Terminal: res.terminal}
 		if acct.ProxyURL != "" {
@@ -811,7 +827,7 @@ func isProxyError(err error, proxyURL string) bool {
 	return strings.Contains(msg, "proxyconnect") || strings.Contains(msg, "socks")
 }
 
-func (s *Server) attempt(w http.ResponseWriter, r *http.Request, cfg *config.Config, lease *pool.Lease, body []byte, proto string, rec *requestLog, attemptNo int, start time.Time, group string) *attemptResult {
+func (s *Server) attempt(w http.ResponseWriter, r *http.Request, cfg *config.Config, lease *pool.Lease, body []byte, proto string, rec *requestLog, attemptNo int, start time.Time, group string, ident Identity) *attemptResult {
 	acct := lease.Account
 	res := &attemptResult{}
 	t0 := time.Now()
@@ -846,20 +862,28 @@ func (s *Server) attempt(w http.ResponseWriter, r *http.Request, cfg *config.Con
 	copyRequestHeaders(req.Header, r.Header)
 	req.Header.Set("Authorization", "Bearer "+acct.RuntimeKey)
 	switch acct.Provider {
-	case config.ProviderOllama:
-		// ollama.com takes the key in Authorization only: its /v1/messages
-		// explicitly refuses x-api-key on its own, so never send it
+	case config.ProviderOllama, config.ProviderModal:
+		// Ollama's /v1/messages explicitly refuses x-api-key on its own, and
+		// Modal authenticates a proxy token in Authorization only: neither
+		// wants the Anthropic header, so never send it
 	default:
 		if proto == "anthropic" {
 			req.Header.Set("X-Api-Key", acct.RuntimeKey)
 		}
 	}
-	if acct.Provider == config.ProviderOllama && proto == "anthropic" {
-		// Ollama's Messages endpoint requires the version header; clients
-		// behind a relay sometimes drop it
+	if (acct.Provider == config.ProviderOllama || acct.Provider == config.ProviderModal) && proto == "anthropic" {
+		// both Messages endpoints require the version header; clients behind
+		// a relay sometimes drop it
 		if req.Header.Get("Anthropic-Version") == "" {
 			req.Header.Set("Anthropic-Version", "2023-06-01")
 		}
+	}
+	if acct.Provider == config.ProviderModal && ident.Fingerprint != "" {
+		// Modal routes a Shared Endpoint's request to the container most
+		// likely to hold its prompt prefix in cache: the routing key is what
+		// keeps one conversation's requests together. Our own HMAC of the
+		// session is exactly that key, and it never leaves as the raw value.
+		req.Header.Set("Modal-Routing-Affinity-Key", ident.Fingerprint)
 	}
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -984,8 +1008,10 @@ func errorStatus(m map[string]any, raw []byte) int {
 	switch {
 	case strings.Contains(lower, "insufficient_balance"):
 		return 402
-	case strings.Contains(lower, "invalid credentials"), strings.Contains(lower, "unauthorized"):
-		// Ollama answers {"error":"invalid credentials"}
+	case strings.Contains(lower, "invalid credentials"), strings.Contains(lower, "unauthorized"),
+		strings.Contains(lower, "invalid proxy auth"):
+		// Ollama answers {"error":"invalid credentials"}; Modal's proxy
+		// answers {"error":"invalid proxy auth credentials"}
 		return 401
 	case strings.Contains(lower, "account suspended"), strings.Contains(lower, "suspended"):
 		return 403
@@ -995,6 +1021,9 @@ func errorStatus(m map[string]any, raw []byte) int {
 		return 401
 	case strings.Contains(lower, "tier_model_not_entitled"), strings.Contains(lower, "permission"):
 		return 403
+	case strings.Contains(lower, "unknown inference model"):
+		// Modal: the model field names no Endpoint this token can see
+		return 404
 	case strings.Contains(lower, "invalid_request"), strings.Contains(lower, "invalid_model"):
 		return 400
 	}

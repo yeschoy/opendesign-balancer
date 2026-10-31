@@ -30,6 +30,8 @@ const (
 	RiverGroup = "river"
 	// OllamaGroup is where Ollama accounts land when no group is named.
 	OllamaGroup = "ollama"
+	// ModalGroup is where Modal accounts land when no group is named.
+	ModalGroup = "modal"
 )
 
 // DefaultGroupFor is the group an account of key's provider joins by default.
@@ -44,6 +46,8 @@ func GroupForProvider(provider string) string {
 		return RiverGroup
 	case ProviderOllama:
 		return OllamaGroup
+	case ProviderModal:
+		return ModalGroup
 	}
 	return DefaultGroup
 }
@@ -65,21 +69,32 @@ type Upstream struct {
 	// (stateless only) and Anthropic Messages (/v1/messages); a self-hosted
 	// server answers at http://host:11434/v1 with the same three paths.
 	OllamaBase string `json:"ollamaBase"`
+	// ModalBase is the single inference host of Modal's Shared Endpoints.
+	// Unlike the other pools a Modal account does not change host per model:
+	// the request's model field IS the Endpoint's hostname
+	// (my-endpoint.us-west.modal.direct), so one base serves every model.
+	// Like the other bases it ends in /v1, which every path is joined to
+	// (the inference host answers 404 without it).
+	ModalBase string `json:"modalBase"`
 }
 
 const (
 	ProviderOpenDesign = "opendesign"
 	ProviderRiver      = "river"
 	ProviderOllama     = "ollama"
+	ProviderModal      = "modal"
 	RiverKeyPrefix     = "rv_"
 	// OllamaKeyPrefix is the prefix the console/import accept for an Ollama
 	// key. ollama.com's own keys carry no documented prefix, so an account
 	// may also be declared provider "ollama" and keep the key verbatim.
 	OllamaKeyPrefix = "oll-"
+	// ModalKeyPrefix is a Modal proxy token's Token ID: the full credential is
+	// "wk-<id>.ws-<secret>" and goes to the upstream verbatim as the bearer.
+	ModalKeyPrefix = "wk-"
 )
 
 // Providers are the pools Validate accepts.
-var Providers = []string{ProviderOpenDesign, ProviderRiver, ProviderOllama}
+var Providers = []string{ProviderOpenDesign, ProviderRiver, ProviderOllama, ProviderModal}
 
 // ProviderForKey infers the provider from a runtime key's prefix. It returns
 // "" for a key whose prefix identifies no provider (an ollama.com API key or a
@@ -90,6 +105,8 @@ func ProviderForKey(key string) string {
 		return ProviderRiver
 	case strings.HasPrefix(key, OllamaKeyPrefix):
 		return ProviderOllama
+	case strings.HasPrefix(key, ModalKeyPrefix):
+		return ProviderModal
 	case strings.HasPrefix(key, "sk-"):
 		return ProviderOpenDesign
 	}
@@ -104,6 +121,14 @@ func ValidRuntimeKey(key string) bool {
 	return ValidRuntimeKeyFor(ProviderForKey(key), key)
 }
 
+// ModalTokenIncomplete reports a Modal proxy token that is only the Token ID:
+// the credential is "wk-<id>.ws-<secret>", and Modal's proxy answers a bare ID
+// with 401 "supply your proxy token as `Bearer wk-<id>.ws-<secret>`" on every
+// host and path, never with a model or billing error.
+func ModalTokenIncomplete(key string) bool {
+	return strings.HasPrefix(key, ModalKeyPrefix) && !strings.Contains(key, ".")
+}
+
 // ValidRuntimeKeyFor reports whether key may be provider's runtime key.
 func ValidRuntimeKeyFor(provider, key string) bool {
 	if key == "" || len(key) > 512 || strings.TrimSpace(key) != key {
@@ -114,6 +139,8 @@ func ValidRuntimeKeyFor(provider, key string) bool {
 		return strings.HasPrefix(key, RiverKeyPrefix)
 	case ProviderOllama:
 		return !strings.ContainsAny(key, " \t\r\n")
+	case ProviderModal:
+		return strings.HasPrefix(key, ModalKeyPrefix) && !strings.ContainsAny(key, " \t\r\n")
 	default:
 		return strings.HasPrefix(key, "sk-")
 	}
@@ -137,7 +164,7 @@ func KnownProvider(p string) bool {
 // pools had keys without a prefix).
 func ResolveProvider(declared, key string) string {
 	switch inferred := ProviderForKey(key); inferred {
-	case ProviderOpenDesign, ProviderRiver, ProviderOllama:
+	case ProviderOpenDesign, ProviderRiver, ProviderOllama, ProviderModal:
 		return inferred
 	}
 	if declared == "" {
@@ -153,8 +180,10 @@ func runtimeKeyError(provider string) string {
 		return "runtime key must start with rv_"
 	case ProviderOllama:
 		return "runtime key must not contain whitespace"
+	case ProviderModal:
+		return "runtime key must be Modal's proxy token wk-<id>.<secret>"
 	default:
-		return "runtime key must start with sk-amr- (or rv_ for River, oll- for Ollama)"
+		return "runtime key must start with sk-amr- (or rv_ for River, oll- for Ollama, wk- for Modal)"
 	}
 }
 
@@ -165,6 +194,8 @@ func (c *Config) RulesFor(provider string) ([]rules.ErrorRule, []rules.RetryRule
 		return c.RiverErrorRules, c.RiverRetryRules
 	case ProviderOllama:
 		return c.OllamaErrorRules, c.OllamaRetryRules
+	case ProviderModal:
+		return c.ModalErrorRules, c.ModalRetryRules
 	}
 	return c.ErrorRules, c.RetryRules
 }
@@ -177,6 +208,8 @@ func DefaultErrorRulesFor(provider string) []rules.ErrorRule {
 		return rules.DefaultRiverErrorRules()
 	case ProviderOllama:
 		return rules.DefaultOllamaErrorRules()
+	case ProviderModal:
+		return rules.DefaultModalErrorRules()
 	}
 	return rules.DefaultErrorRules()
 }
@@ -188,6 +221,8 @@ func DefaultRetryRulesFor(provider string) []rules.RetryRule {
 		return rules.DefaultRiverRetryRules()
 	case ProviderOllama:
 		return rules.DefaultOllamaRetryRules()
+	case ProviderModal:
+		return rules.DefaultModalRetryRules()
 	}
 	return rules.DefaultRetryRules()
 }
@@ -238,7 +273,7 @@ func (c *Config) GroupPool(group string) string {
 // be moved into another pool by a typo.
 func (c *Config) keyProvider(declared, group string) (string, error) {
 	if declared != "" && !KnownProvider(declared) {
-		return "", fmt.Errorf("provider must be opendesign, river or ollama")
+		return "", fmt.Errorf("provider must be opendesign, river, ollama or modal")
 	}
 	// a group an account already holds is that pool's, full stop
 	if pool := c.GroupProvider(group); pool != "" {
@@ -267,6 +302,8 @@ func (c *Config) RuntimeBase(a Account) string {
 		return c.Upstream.RiverBase
 	case ProviderOllama:
 		return c.Upstream.OllamaBase
+	case ProviderModal:
+		return c.Upstream.ModalBase
 	}
 	return c.Upstream.RuntimeBase
 }
@@ -432,6 +469,8 @@ type Config struct {
 	RiverRetryRules  []rules.RetryRule `json:"riverRetryRules"`
 	OllamaErrorRules []rules.ErrorRule `json:"ollamaErrorRules"`
 	OllamaRetryRules []rules.RetryRule `json:"ollamaRetryRules"`
+	ModalErrorRules  []rules.ErrorRule `json:"modalErrorRules"`
+	ModalRetryRules  []rules.RetryRule `json:"modalRetryRules"`
 	Logs             Logs              `json:"logs"`
 	Pricing          pricing.Config    `json:"pricing"`
 }
@@ -444,6 +483,7 @@ func Default() *Config {
 			ControlBase: "https://amr-api.open-design.ai",
 			RiverBase:   "https://api.river.ai/v1",
 			OllamaBase:  "https://ollama.com/v1",
+			ModalBase:   "https://inference.us-west.modal.direct/v1",
 		},
 		ClientKeys: []ClientKey{},
 		ImportKeys: []ImportKey{},
@@ -465,6 +505,8 @@ func Default() *Config {
 		RiverRetryRules:  rules.DefaultRiverRetryRules(),
 		OllamaErrorRules: rules.DefaultOllamaErrorRules(),
 		OllamaRetryRules: rules.DefaultOllamaRetryRules(),
+		ModalErrorRules:  rules.DefaultModalErrorRules(),
+		ModalRetryRules:  rules.DefaultModalRetryRules(),
 		Pricing:          pricing.Config{Models: pricing.Defaults(), Holidays: []string{}},
 		Logs:             Logs{RetentionDays: 30, MaxRequests: 50000, MaxErrors: 10000, MaxTotalMB: 100, MaxDetails: 500, DetailBodyKB: 6144},
 	}
@@ -537,11 +579,25 @@ func (c *Config) Normalize() error {
 	if c.Upstream.OllamaBase == "" {
 		c.Upstream.OllamaBase = d.Upstream.OllamaBase
 	}
+	if c.Upstream.ModalBase == "" {
+		c.Upstream.ModalBase = d.Upstream.ModalBase
+	}
+	// every pool's base carries the /v1 every path is joined to; Modal's
+	// host answers 404 without it, so a base configured as the bare host
+	// (as the dashboard prints it) is completed here rather than failing
+	// every request with somebody else's 404
+	if c.Upstream.ModalBase != "" && !strings.HasSuffix(strings.TrimRight(c.Upstream.ModalBase, "/"), "/v1") {
+		t := strings.TrimRight(c.Upstream.ModalBase, "/")
+		if u, err := url.Parse(t); err == nil && (u.Path == "" || u.Path == "/") {
+			c.Upstream.ModalBase = t + "/v1"
+		}
+	}
 	c.Upstream.RiverBase = strings.TrimRight(c.Upstream.RiverBase, "/")
 	c.Upstream.RuntimeBase = strings.TrimRight(c.Upstream.RuntimeBase, "/")
 	c.Upstream.ControlBase = strings.TrimRight(c.Upstream.ControlBase, "/")
 	c.Upstream.OllamaBase = strings.TrimRight(c.Upstream.OllamaBase, "/")
-	for _, u := range []string{c.Upstream.RuntimeBase, c.Upstream.ControlBase, c.Upstream.RiverBase, c.Upstream.OllamaBase} {
+	c.Upstream.ModalBase = strings.TrimRight(c.Upstream.ModalBase, "/")
+	for _, u := range []string{c.Upstream.RuntimeBase, c.Upstream.ControlBase, c.Upstream.RiverBase, c.Upstream.OllamaBase, c.Upstream.ModalBase} {
 		if p, err := url.Parse(u); err != nil || (p.Scheme != "http" && p.Scheme != "https") || p.Host == "" {
 			return fmt.Errorf("invalid upstream URL %q", u)
 		}
@@ -587,6 +643,19 @@ func (c *Config) Normalize() error {
 	}
 	if err := rules.ValidateRetryRules(c.OllamaRetryRules); err != nil {
 		return fmt.Errorf("ollama: %w", err)
+	}
+	// and for a config written before the Modal pool
+	if c.ModalErrorRules == nil {
+		c.ModalErrorRules = rules.DefaultModalErrorRules()
+	}
+	if c.ModalRetryRules == nil {
+		c.ModalRetryRules = rules.DefaultModalRetryRules()
+	}
+	if err := rules.ValidateErrorRules(c.ModalErrorRules); err != nil {
+		return fmt.Errorf("modal: %w", err)
+	}
+	if err := rules.ValidateRetryRules(c.ModalRetryRules); err != nil {
+		return fmt.Errorf("modal: %w", err)
 	}
 	if err := rules.ValidateErrorRules(c.ErrorRules); err != nil {
 		return err
@@ -667,7 +736,7 @@ func (c *Config) Normalize() error {
 		if !ValidRuntimeKeyFor(a.Provider, a.RuntimeKey) {
 			return fmt.Errorf("accounts[%s]: %v", a.ID, runtimeKeyError(a.Provider))
 		}
-		if a.Provider == ProviderRiver || a.Provider == ProviderOllama {
+		if a.Provider == ProviderRiver || a.Provider == ProviderOllama || a.Provider == ProviderModal {
 			if a.ControlKey != "" {
 				return fmt.Errorf("accounts[%s]: %s accounts have no control key", a.ID, a.Provider)
 			}
@@ -997,7 +1066,7 @@ func Mask(key string) string {
 		return ""
 	}
 	prefix := ""
-	for _, p := range []string{"vela_ctrl_", "sk-amr-", "sk-", RiverKeyPrefix, OllamaKeyPrefix} {
+	for _, p := range []string{"vela_ctrl_", "sk-amr-", "sk-", RiverKeyPrefix, OllamaKeyPrefix, ModalKeyPrefix} {
 		if strings.HasPrefix(key, p) {
 			prefix = p
 			break

@@ -9,14 +9,19 @@ let settingsCache = null;
 let currentPage = 'overview';
 let refreshTimer = null;
 // the pool tab on top: every list, overview and log shows one pool only
-const POOLS = ['opendesign', 'river', 'ollama'];
+const POOLS = ['opendesign', 'river', 'ollama', 'modal'];
 let pool = POOLS.includes(localStorage.getItem('odb-pool')) ? localStorage.getItem('odb-pool') : 'opendesign';
-const POOL_LABEL = { opendesign: 'OpenDesign', river: 'River', ollama: 'Ollama' };
+const POOL_LABEL = { opendesign: 'OpenDesign', river: 'River', ollama: 'Ollama', modal: 'Modal' };
 // the default group of each pool, and what its keys look like
-const POOL_GROUP = { opendesign: 'default', river: 'river', ollama: 'ollama' };
+const POOL_GROUP = { opendesign: 'default', river: 'river', ollama: 'ollama', modal: 'modal' };
 const defaultGroup = () => POOL_GROUP[pool] || 'default';
 const isOllama = () => pool === 'ollama';
-const RT_HINT = { opendesign: 'sk-amr-…', river: 'rv_…', ollama: 'ollama.com/settings/keys 签发的 key 原样粘贴' };
+const isModal = () => pool === 'modal';
+// pools whose key carries no provider prefix the backend can verify: the
+// console declares the pool explicitly when adding an account
+const keyNeedsProvider = () => isOllama();
+const RT_HINT = { opendesign: 'sk-amr-…', river: 'rv_…', ollama: 'ollama.com/settings/keys 签发的 key 原样粘贴',
+  modal: 'wk-<id>.ws-<secret>（Proxy Token 的完整形态，两段都要）' };
 const withPool = (path) => path + (path.includes('?') ? '&' : '?') + 'provider=' + pool;
 
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -197,12 +202,13 @@ function renderPoolTabs() {
   document.body.dataset.pool = pool;
   $('#btn-add-device').classList.toggle('hidden', pool !== 'opendesign');
   // the last two columns of the account table mean different things per pool
-  const heads = { windows: { opendesign: 'Design Plan 窗口', river: '额度', ollama: '额度（/api/balance）' },
-    wallet: { opendesign: '钱包 / 套餐模型额度', river: '24h 用量', ollama: '已购额度 / 24h 用量' } };
+  const heads = { windows: { opendesign: 'Design Plan 窗口', river: '额度', ollama: '额度（/api/balance）', modal: '可用 Endpoint' },
+    wallet: { opendesign: '钱包 / 套餐模型额度', river: '24h 用量', ollama: '已购额度 / 24h 用量', modal: '24h 用量' } };
   $$('#acc-table th[data-head]').forEach((th) => { th.textContent = heads[th.dataset.head][pool] || ''; });
   $('#acc-empty').textContent = {
     river: '还没有 River 账号。点「批量导入」粘贴 rv_ 开头的 key，每行一个。',
     ollama: '还没有 Ollama 账号。点「批量导入」一行一个 key（ollama.com/settings/keys 签发，本池的 key 不要求前缀），或「手动添加」。',
+    modal: '还没有 Modal 账号。点「批量导入」一行一个 Proxy Token（wk-<id>.ws-<secret>，modal.com/settings/proxy-auth-tokens 创建），或「手动添加」。',
   }[pool] || '还没有账号。点「设备授权添加」，在已登录该账号的浏览器里批准即可。';
 }
 $('#pool-tabs').addEventListener('click', (ev) => {
@@ -229,6 +235,7 @@ async function loadOverview() {
     ...(pool !== 'opendesign' ? [] : o.windows).map((w) => [`${fmtDur(w.durationSeconds)}窗口剩余`, num(w.remaining), `共 ${num(w.limit)} · ${w.workspaces} 个工作区 · 已用 ${w.limit ? (w.used / w.limit * 100).toFixed(1) : 0}%`]),
     ...(pool !== 'opendesign' ? [] : [['钱包合计', '$' + o.walletUsd.toFixed(2), `${o.walletAccounts} 个工作区`]]),
     ...(pool === 'ollama' && o.ollamaAccounts ? [['Ollama 额度合计', '$' + o.ollamaCredits.toFixed(2), `${o.ollamaAccounts} 个账号（含赠送额度 + 已购额度，同一团队的 key 会重复计）`]] : []),
+    ...(pool === 'modal' && o.modalAccounts ? [['可用 Endpoint', num(o.modalEndpoints), `${o.modalAccounts} 个账号的 token 能访问的 Endpoint 数（同一 Endpoint 会被多个账号各计一次）`]] : []),
     ['24h 请求', num(st.r), `成功率 ${okRate === null ? '—' : pct(okRate)} · 近 1h ${num(o.stats.lastHour.r)}`],
     ['24h 费用', costSum(st), '按模型价格估算，未配价格的不计'],
     ['24h 缓存命中率', hitRate(st) === null ? '—' : pct(hitRate(st)), `缓存 ${num(st.k)} / 提示 ${num(st.p)} token`],
@@ -257,7 +264,7 @@ async function loadOverview() {
   $('#ov-windows').innerHTML = o.windows.length ? o.windows.map((w) => {
     const used = w.limit ? w.used / w.limit * 100 : 0;
     return `<div class="win"><div class="row"><b>${esc(fmtDur(w.durationSeconds))}</b><span class="muted">剩余 ${num(w.remaining)} / ${num(w.limit)} credits</span></div><div class="bar ${used >= 98 ? 'bad' : used >= 90 ? 'warn' : ''}"><i data-w="${used}"></i></div></div>`;
-  }).join('') : `<p class="muted">${pool === 'river' ? 'River 没有额度接口，额度用完靠上游 402 / 429 错误推断冷却。' : pool === 'ollama' ? '暂无余额数据：Ollama 的 key 直接读 /api/balance，30 秒内不会重复读（该接口每个用户每分钟限 10 次）。' : '暂无额度数据（需要账号配置 vela_ctrl_ 控制密钥）。'}</p>`;
+  }).join('') : `<p class="muted">${pool === 'river' ? 'River 没有额度接口，额度用完靠上游 402 / 429 错误推断冷却。' : pool === 'ollama' ? '暂无余额数据：Ollama 的 key 直接读 /api/balance，30 秒内不会重复读（该接口每个用户每分钟限 10 次）。' : pool === 'modal' ? 'Modal 没有额度接口：Shared Endpoint 按 token 从工作区余额计费，只能在 Modal 控制台看；本服务只在遇到 402 时冷却账号。' : '暂无额度数据（需要账号配置 vela_ctrl_ 控制密钥）。'}</p>`;
   applyWidths($('#ov-windows'));
   $('#ov-status').innerHTML = Object.entries(o.status).map(([k, v]) => `<span class="badge ${statusClass(k)}">${esc(statusLabel(k))} ${v}</span>`).join('') || '<span class="muted">无账号</span>';
   $('#ov-updated').textContent = '更新于 ' + fmtTime(o.stats.generated);
@@ -298,8 +305,31 @@ function ollamaQuotaHTML(a) {
   return parts.join('');
 }
 
+// modalEndpointsHTML lists the Endpoints a Modal proxy token can reach. On
+// Modal the request's model field IS the Endpoint's hostname, so this list is
+// the account's model catalogue — the only quota-like signal there is.
+function modalEndpointsHTML(a) {
+  const q = a.quota;
+  const u = a.usage24h || {};
+  const usage = `<div class="acc-sub">24h：${num(u.r || 0)} 次 · ${num((u.i || 0) + (u.o || 0))} tokens</div>`;
+  if (!q || !q.catalog) return '<span class="muted small">等待首次读取…</span>' + usage;
+  const on = Object.entries(q.catalog).filter(([, en]) => en).map(([m]) => m).sort();
+  const parts = [];
+  if (q.authFailed || q.catalogError) {
+    parts.push(`<span class="badge bad">Token 读取失败</span><div class="acc-sub" title="${esc(q.catalogError || q.lastError || '')}">${esc(q.catalogError || q.lastError || '')}</div>`);
+  }
+  parts.push(`<div class="acc-sub" title="${esc('该 token 的 /v1/models（即能访问的 Endpoint）：\n' + (on.join('\n') || '（空）'))}">可用 Endpoint <b>${on.length}</b> 个</div>`);
+  // the first few hostnames, so the list is readable at a glance
+  for (const m of on.slice(0, 4)) parts.push(`<div class="acc-sub"><code>${esc(m)}</code></div>`);
+  if (on.length > 4) parts.push(`<div class="acc-sub muted">…另有 ${on.length - 4} 个</div>`);
+  if (a.quotaFresh === false) parts.push('<span class="badge warn">数据过期</span>');
+  parts.push(usage);
+  return parts.join('');
+}
+
 function windowsHTML(a) {
   if (a.provider === 'ollama') return ollamaQuotaHTML(a);
+  if (a.provider === 'modal') return modalEndpointsHTML(a);
   const q = a.quota;
   if (!a.hasControlKey) {
     const u = a.usage24h || {};
@@ -330,6 +360,7 @@ function accountRow(a) {
   const st = r.state || {};
   const models = Object.entries(st.models || {});
   let status = `<span class="badge ${statusClass(r.status)}">${esc(statusLabel(r.status))}</span>`;
+  if (a.tokenIncomplete) status = '<span class="badge bad">Token 不完整</span><div class="acc-sub" title="只填了 wk-<id> 那段。Modal 要的是 wk-<id>.ws-<secret>：到 modal.com/settings/proxy-auth-tokens 复制完整的 Proxy Token；旧 token 的 secret 只在创建时显示一次，看不到就新建一个，然后在这里改运行密钥">只有 wk-&lt;id&gt;，缺少 .ws-&lt;secret&gt;</div>';
   if (st.cooldownUntil) status += `<div class="acc-sub">至 ${esc(fmtTime(st.cooldownUntil, true))}</div>`;
   if (st.ruleId) status += `<div class="acc-sub">规则 ${esc(st.ruleId)}${st.statusCode ? ' · ' + st.statusCode : ''}</div>`;
   if (st.learnedConcurrency || st.learnedRpm) status += `<div class="acc-sub" title="网关 tier_limit_exceeded 告知的套餐上限；点「恢复」清除">学到上限：${st.learnedConcurrency ? '并发 ' + st.learnedConcurrency : ''}${st.learnedRpm ? ' RPM ' + st.learnedRpm : ''}</div>`;
@@ -341,22 +372,26 @@ function accountRow(a) {
   const q = a.quota;
   const credits = (v) => { const f = parseFloat(v); return Number.isFinite(f) ? num(f) : '—'; };
   // Ollama keeps its own three amounts: included, purchased, and what this
-  // pool sent in the last 24h
+  // pool sent in the last 24h; Modal has neither wallet nor package credits
   const ollama = a.provider === 'ollama';
+  const modal = a.provider === 'modal';
   const ou = a.usage24h || {};
-  const wallet = ollama
-    ? (q && q.ollama && q.ollama.purchasedUsd !== undefined && q.ollama.purchasedUsd !== ''
-      ? usd(q.ollama.purchasedUsd) + `<div class="acc-sub">24h ${num(ou.r || 0)} 次 · ${num((ou.i || 0) + (ou.o || 0))} tokens</div>` : '—')
-    : (q && q.walletUsd !== undefined && q.walletUsd !== '' ? usd(q.walletUsd) + (q.walletSource === 'preflight' ? '<div class="acc-sub">来源 preflight</div>' : '') : '—');
-  const pkg = !ollama && q && q.summary ? `<div class="acc-sub" title="套餐模型额度：Design Plan 窗口用尽后、以及调用套餐模型（Claude Sonnet、GPT-6 Sol、Gemini 等）时扣这里，按计费周期重置不结转">套餐模型 ${credits(q.summary.subscriptionCredits)}</div><div class="acc-sub">充值 ${credits(q.summary.rechargeCredits)}</div>` : '';
-  const cov = !ollama && q && q.coverage ? Object.entries(q.coverage) : [];
+  const usage24 = `<div class="acc-sub">24h ${num(ou.r || 0)} 次 · ${num((ou.i || 0) + (ou.o || 0))} tokens</div>`;
+  const wallet = modal
+    ? (ou.r ? num(ou.r) + usage24 : '—')
+    : ollama
+      ? (q && q.ollama && q.ollama.purchasedUsd !== undefined && q.ollama.purchasedUsd !== ''
+        ? usd(q.ollama.purchasedUsd) + usage24 : '—')
+      : (q && q.walletUsd !== undefined && q.walletUsd !== '' ? usd(q.walletUsd) + (q.walletSource === 'preflight' ? '<div class="acc-sub">来源 preflight</div>' : '') : '—');
+  const pkg = !ollama && !modal && q && q.summary ? `<div class="acc-sub" title="套餐模型额度：Design Plan 窗口用尽后、以及调用套餐模型（Claude Sonnet、GPT-6 Sol、Gemini 等）时扣这里，按计费周期重置不结转">套餐模型 ${credits(q.summary.subscriptionCredits)}</div><div class="acc-sub">充值 ${credits(q.summary.rechargeCredits)}</div>` : '';
+  const cov = !ollama && !modal && q && q.coverage ? Object.entries(q.coverage) : [];
   const cat = q && q.catalog ? Object.entries(q.catalog) : [];
   const catOn = cat.filter(([, en]) => en).map(([m]) => m).sort();
-  const catTitle = ollama ? '该 key 的 /v1/models（Ollama 云端目录对所有 key 相同）：\n' : '该 API Key 的模型列表（/v1/models），决定套餐能调用哪些模型：\n';
-  const catHTML = cat.length ? `<div class="acc-sub" title="${esc(catTitle + catOn.join('\n'))}">可用模型 ${catOn.length}${cat.length > catOn.length ? ' / ' + cat.length : ''} 个</div>` : (q && q.catalogError ? `<div class="acc-sub">模型列表读取失败：${esc(q.catalogError)}</div>` : '');
+  const catTitle = ollama ? '该 key 的 /v1/models（Ollama 云端目录对所有 key 相同）：\n' : modal ? '该 token 的 /v1/models（即它能访问的 Endpoint，模型名就是 Endpoint 的 hostname）：\n' : '该 API Key 的模型列表（/v1/models），决定套餐能调用哪些模型：\n';
+  const catHTML = modal ? '' : cat.length ? `<div class="acc-sub" title="${esc(catTitle + catOn.join('\n'))}">可用模型 ${catOn.length}${cat.length > catOn.length ? ' / ' + cat.length : ''} 个</div>` : (q && q.catalogError ? `<div class="acc-sub">模型列表读取失败：${esc(q.catalogError)}</div>` : '');
   status += catHTML;
   const covHTML = cov.length ? `<div class="acc-sub" title="${esc(cov.map(([m, c]) => m + '：' + (c.covered === true ? 'Design Plan 模型' : c.covered === false ? '套餐模型' : '未知')).join('\n'))}">已识别 ${cov.length} 个模型的类别</div>` : '';
-  const sum = !ollama && q && q.summary ? `<div class="acc-sub" title="累计消费 ${esc(q.summary.totalConsumedUsd)} · 累计充值 ${esc(q.summary.totalRechargedUsd)} · 调用 ${esc(q.summary.usageCount)} 次">今日 ${esc(usd(q.summary.todayConsumedUsd))}</div>` : '';
+  const sum = !ollama && !modal && q && q.summary ? `<div class="acc-sub" title="累计消费 ${esc(q.summary.totalConsumedUsd)} · 累计充值 ${esc(q.summary.totalRechargedUsd)} · 调用 ${esc(q.summary.usageCount)} 次">今日 ${esc(usd(q.summary.todayConsumedUsd))}</div>` : '';
   const tier = q && (q.tier || q.membershipTier) ? `<span class="badge accent">${esc(q.tier || q.membershipTier)}</span>` : '';
   const shared = a.sharedWorkspaceWith && a.sharedWorkspaceWith.length ? `<span class="badge warn" title="与其他账号同一工作区，额度共享">共享工作区</span>` : '';
   return `<tr data-id="${esc(a.id)}">
@@ -482,11 +517,13 @@ function accountForm(a) {
     <label>分组</label><input id="f-group" value="${v('group', defGroup)}" placeholder="${defGroup}">
     <span class="hint">下游密钥只调度同分组的账号</span>
     <label>运行密钥</label><input id="f-rt" placeholder="${a ? esc(a.runtimeKey) + '（留空不变）' : RT_HINT[pool] || RT_HINT.opendesign}" autocomplete="off">
-    ${isOllama() ? `<span></span><span class="hint">Ollama 的 key 直接读 /api/balance，没有单独的控制密钥；自建服务填任意值（如 <code>ollama</code>）即可</span>`
+    ${isOllama() || isModal() ? `<span></span><span class="hint">${isModal()
+      ? 'Modal 只有 Proxy Token 一把钥匙：它既能推理，也能列出该 token 可见的 Endpoint；Modal 没有额度接口，没有控制密钥'
+      : 'Ollama 的 key 直接读 /api/balance，没有单独的控制密钥；自建服务填任意值（如 <code>ollama</code>）即可'}</span>`
       : `<label>控制密钥</label><input id="f-ctrl" placeholder="${a && a.hasControlKey ? esc(a.controlKey) + '（留空不变）' : 'vela_ctrl_…（可选，用于读额度）'}" autocomplete="off">
     ${a && a.hasControlKey ? '<span></span><label class="check"><input type="checkbox" id="f-clear-ctrl">移除控制密钥</label>' : ''}`}
     ${a ? `<span></span><span class="keycopy"><button type="button" class="btn small" data-copy="runtimeKey">复制运行密钥</button>${a.hasControlKey ? '<button type="button" class="btn small" data-copy="controlKey">复制控制密钥</button>' : ''}</span>` : ''}
-    ${!a ? `<span></span><span class="hint">新账号进 ${POOL_LABEL[pool]} 号池${isOllama() ? '（provider=ollama）' : ''}</span>` : ''}
+    ${!a ? `<span></span><span class="hint">新账号进 ${POOL_LABEL[pool]} 号池${keyNeedsProvider() ? '（provider=' + pool + '）' : ''}</span>` : ''}
     <label>最大并发</label><input id="f-conc" type="number" min="0" value="${v('maxConcurrent', 0)}">
     <span class="hint">0 表示不限</span>
     <label>每分钟请求</label><input id="f-rpm" type="number" min="0" value="${v('maxRpm', 0)}">
@@ -505,7 +542,7 @@ function readAccountForm() {
     maxConcurrent: n('#f-conc'), maxRpm: n('#f-rpm'), weight: n('#f-weight'), priority: n('#f-prio'), enabled: $('#f-enabled').checked };
   if ($('#f-rt').value.trim()) out.runtimeKey = $('#f-rt').value.trim();
   if ($('#f-ctrl') && $('#f-ctrl').value.trim()) out.controlKey = $('#f-ctrl').value.trim();
-  if (isOllama()) out.provider = 'ollama'; // an Ollama key has no prefix to read this from
+  if (keyNeedsProvider()) out.provider = pool; // an Ollama key has no prefix to read this from
   if ($('#f-proxy').value.trim()) out.proxyUrl = $('#f-proxy').value.trim();
   if ($('#f-clear-ctrl') && $('#f-clear-ctrl').checked) out.clearControlKey = true;
   if ($('#f-clear-proxy') && $('#f-clear-proxy').checked) out.clearProxy = true;
@@ -534,16 +571,19 @@ $('#btn-add-manual').addEventListener('click', async () => {
   loadAccounts().catch(() => {});
 });
 $('#btn-import').addEventListener('click', async () => {
-  const help = isOllama()
-    ? `<p class="muted small">每行一个账号：<code>运行密钥[,名称[,代理URL]]</code>。Ollama 的 key 没有固定前缀，导入时整行按本池默认的 <code>provider=ollama</code> 处理；也可以在行首写 <code>provider:ollama</code> 明确指定。逗号、空格或制表符分隔，<code>#</code> 开头为注释。</p>`
-    : `<p class="muted small">每行一个账号：<code>运行密钥[,控制密钥[,名称[,代理URL]]]</code>（<code>rv_</code> 开头的自动识别为 River 账号，无控制密钥），逗号、空格或制表符分隔，<code>#</code> 开头为注释。行首可写 <code>provider:ollama</code> 指定 Ollama 号池。</p>`;
-  const ph = { opendesign: 'sk-amr-xxx,vela_ctrl_xxx,账号A\nrv_xxx,River-1', river: 'rv_xxx,River-1', ollama: 'xxxxxxxxxxxxxxxxxxxxxxxx,ollama-1' }[pool];
+  const help = isModal()
+    ? `<p class="muted small">每行一个账号：<code>运行密钥[,名称[,代理URL]]</code>。Modal 的 Proxy Token 形如 <code>wk-&lt;id&gt;.ws-&lt;secret&gt;</code>，<b>两段都要</b>（只有 <code>wk-</code> 那段上游会回 401）。Modal 没有控制密钥。逗号、空格或制表符分隔，<code>#</code> 开头为注释。</p>`
+    : isOllama()
+      ? `<p class="muted small">每行一个账号：<code>运行密钥[,名称[,代理URL]]</code>。Ollama 的 key 没有固定前缀，导入时整行按本池默认的 <code>provider=ollama</code> 处理；也可以在行首写 <code>provider:ollama</code> 明确指定。逗号、空格或制表符分隔，<code>#</code> 开头为注释。</p>`
+      : `<p class="muted small">每行一个账号：<code>运行密钥[,控制密钥[,名称[,代理URL]]]</code>（<code>rv_</code> 开头的自动识别为 River 账号、<code>wk-</code> 开头的是 Modal 账号，都没有控制密钥），逗号、空格或制表符分隔，<code>#</code> 开头为注释。行首可写 <code>provider:ollama</code> / <code>provider:modal</code> 指定号池。</p>`;
+  const ph = { opendesign: 'sk-amr-xxx,vela_ctrl_xxx,账号A\nrv_xxx,River-1\nwk-xxx.ws-yyy,Modal-1', river: 'rv_xxx,River-1',
+    ollama: 'xxxxxxxxxxxxxxxxxxxxxxxx,ollama-1', modal: 'wk-xxxxxxxx.ws-yyyyyyyy,Modal-1' }[pool];
   await modal({ title: '批量导入', wide: true,
     body: `${help}
       <textarea id="imp-text" class="code" rows="10" placeholder="${esc(ph)}"></textarea>
       <div class="row"><label class="muted">分组</label><input id="imp-group" placeholder="${defaultGroup()}"></div>`,
     buttons: [{ label: '取消', value: 'c' }, { label: '导入', value: 'ok', primary: true, action: async () => {
-      const r = await api('POST', '/api/accounts/import', { text: $('#imp-text').value, group: $('#imp-group').value, provider: isOllama() ? 'ollama' : '' });
+      const r = await api('POST', '/api/accounts/import', { text: $('#imp-text').value, group: $('#imp-group').value, provider: keyNeedsProvider() ? pool : '' });
       toast(`已导入 ${r.added} 个账号`);
     } }] });
   loadAccounts().catch(() => {});
@@ -556,8 +596,8 @@ async function testAccount(a) {
     $('#test-out').textContent = JSON.stringify(r, null, 2);
   };
   await modal({ title: '测试 ' + a.name, wide: true,
-    body: `<p class="muted small">「免费检查」只读取${a.provider === 'ollama' ? '模型列表和 /api/balance 余额' : '模型列表和工作区'}，不消耗额度。「真实请求」会发一条 max_tokens=1 的推理，消耗少量 credits。</p>
-      <div class="row"><input id="test-model" placeholder="真实请求模型，默认 ${esc(a.provider === 'ollama' ? 'gpt-oss:20b' : a.provider === 'river' ? 'deepseek-ai/DeepSeek-V4.1-Flash' : 'deepseek-v4.1-flash')}" size="34"></div>
+    body: `<p class="muted small">「免费检查」只读取${a.provider === 'ollama' ? '模型列表和 /api/balance 余额' : a.provider === 'modal' ? '该 token 能访问的 Endpoint 列表' : '模型列表和工作区'}，不消耗额度。「真实请求」会发一条 max_tokens=1 的推理，消耗少量 ${a.provider === 'modal' ? 'token（按量计费）' : 'credits'}。</p>
+      <div class="row"><input id="test-model" placeholder="真实请求模型，默认 ${esc(a.provider === 'ollama' ? 'gpt-oss:20b' : a.provider === 'river' ? 'deepseek-ai/DeepSeek-V4.1-Flash' : a.provider === 'modal' ? '该账号列表里的第一个 Endpoint hostname' : 'deepseek-v4.1-flash')}" size="34"></div>
       <pre id="test-out" class="mt">点击下方按钮开始</pre>`,
     buttons: [{ label: '关闭', value: 'c' }, { label: '真实请求', value: 'inf', action: async () => { await run(true); return false; } },
       { label: '免费检查', value: 'free', primary: true, action: async () => { await run(false); return false; } }] });

@@ -31,7 +31,8 @@ const maxImportLog = 1000
 
 type importRecord struct {
 	ID string `json:"id"`
-	// Provider is the pool the accounts joined (opendesign | river | ollama),
+	// Provider is the pool the accounts joined (opendesign | river | ollama |
+	// modal),
 	// so each pool's console tab lists only its own imports. It is empty on a
 	// record written before pools had their own tabs.
 	Provider    string    `json:"provider,omitempty"`

@@ -995,10 +995,372 @@ func TestSettingsSaveScopedToPool(t *testing.T) {
 	if rv, _ := cfg.RulesFor(config.ProviderRiver); len(rv) != len(rvBefore) || rv[0].ID != rvBefore[0].ID {
 		t.Fatalf("river rules changed: %v", rv)
 	}
+	// and the Modal tab, added after that test was written, is its own too
+	mdBefore, _ := cfg.RulesFor(config.ProviderModal)
+	in = settingsDoc{Revision: cfg.Revision, Upstream: cfg.Upstream, Routing: cfg.Routing, Quota: cfg.Quota, Logs: cfg.Logs,
+		Pricing: cfg.Pricing, ErrorRules: []rules.ErrorRule{{ID: "only-modal", Scope: rules.ScopeAccount,
+			Action: rules.ActionIgnore, When: rules.Match{Statuses: []int{418}}}},
+		RetryRules: []rules.RetryRule{{ID: "only-modal-retry", Decision: rules.DecisionStop, When: rules.Match{Statuses: []int{418}}}}}
+	body, _ = json.Marshal(in)
+	rec = httptest.NewRecorder()
+	s.apiSaveSettings(rec, httptest.NewRequest(http.MethodPut, "/api/settings?provider=modal", bytes.NewReader(body)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("modal save: %d %s", rec.Code, rec.Body.String())
+	}
+	cfg = s.cfg.Get()
+	if md, mdr := mustRules(t, cfg, config.ProviderModal); len(md) != 1 || md[0].ID != "only-modal" || len(mdr) != 1 || mdr[0].ID != "only-modal-retry" {
+		t.Fatalf("modal rules = %v %v", md, mdr)
+	}
+	if od, _ := cfg.RulesFor(config.ProviderOpenDesign); len(od) != len(odBefore) || od[0].ID != odBefore[0].ID {
+		t.Fatalf("opendesign rules changed by the modal save: %v", od)
+	}
+	if ol, _ := cfg.RulesFor(config.ProviderOllama); len(ol) != 1 || ol[0].ID != "only-ollama" {
+		t.Fatalf("ollama rules changed by the modal save: %v", ol)
+	}
+	if len(mdBefore) != 5 {
+		t.Fatalf("modal defaults = %d rules", len(mdBefore))
+	}
+
+	// the Modal tab reads its own rules back, with its own defaults
+	rec = httptest.NewRecorder()
+	s.apiSettings(rec, httptest.NewRequest(http.MethodGet, "/api/settings?provider=modal", nil))
+	var got struct {
+		Provider string         `json:"provider"`
+		Settings settingsDoc    `json:"settings"`
+		Defaults map[string]any `json:"defaults"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.Provider != config.ProviderModal || len(got.Settings.ErrorRules) != 1 || got.Settings.ErrorRules[0].ID != "only-modal" {
+		t.Fatalf("modal settings = %+v", got.Settings)
+	}
+	defs, _ := got.Defaults["errorRules"].([]any)
+	if len(defs) != 5 {
+		t.Fatalf("modal defaults served = %v", got.Defaults["errorRules"])
+	}
+	if first, _ := defs[0].(map[string]any); first["id"] != "modal-token-invalid" {
+		t.Fatalf("modal default rule = %v", first["id"])
+	}
 }
 
 func mustRules(t *testing.T, c *config.Config, p string) ([]rules.ErrorRule, []rules.RetryRule) {
 	t.Helper()
 	e, r := c.RulesFor(p)
 	return e, r
+}
+
+// A Modal pool sends all three protocols to one host: on Modal the request's
+// model field IS the Endpoint's hostname, so the account never changes base
+// per model. The proxy token goes in Authorization only, and the session is
+// passed on as Modal's affinity key so the prompt prefix stays on one
+// container.
+func TestModalPoolServesThreeProtocols(t *testing.T) {
+	const token = "wk-example0000000000.ws-secret"
+	var mu sync.Mutex
+	seen := map[string]http.Header{}
+	bodies := map[string]map[string]any{}
+	e := newEnv(t, []config.Account{{ID: "m1", Provider: config.ProviderModal, Group: "modal", RuntimeKey: token}}, func(c *config.Config) {
+		c.Upstream.ModalBase = c.Upstream.RuntimeBase
+		c.ClientKeys = []config.ClientKey{{ID: "ck2", Group: "modal", KeyHash: config.HashKey("sk-odb-modal"), KeyPrefix: "x", Enabled: true}}
+	})
+	e.up.handle = func(w http.ResponseWriter, r *http.Request, key string, body map[string]any) {
+		mu.Lock()
+		seen[r.URL.Path] = r.Header.Clone()
+		bodies[r.URL.Path] = body
+		mu.Unlock()
+		switch r.URL.Path {
+		case "/v1/messages":
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"id":"msg_1","type":"message","role":"assistant","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":7,"output_tokens":2}}`)
+		default:
+			writeOK(w, key)
+		}
+	}
+	e.key = "sk-odb-modal"
+
+	for _, path := range []string{"/v1/chat/completions", "/v1/responses", "/v1/messages"} {
+		hdr := map[string]string{}
+		if path == "/v1/messages" {
+			hdr["anthropic-version"] = "2023-06-01"
+		}
+		body := chat(false)
+		body["model"] = "my-endpoint.us-west.modal.direct"
+		resp := e.post(path, body, hdr)
+		out := readAll(resp)
+		if resp.StatusCode != http.StatusOK {
+			t.Fatalf("%s: status %d body %s", path, resp.StatusCode, out)
+		}
+		mu.Lock()
+		h, got := seen[path], bodies[path]
+		mu.Unlock()
+		if h == nil {
+			t.Fatalf("%s never reached the upstream", path)
+		}
+		if got := h.Get("Authorization"); got != "Bearer "+token {
+			t.Fatalf("%s: Authorization %q", path, got)
+		}
+		// Modal authenticates a proxy token in Authorization only
+		if got := h.Get("X-Api-Key"); got != "" {
+			t.Fatalf("%s: unexpected x-api-key %q", path, got)
+		}
+		if path == "/v1/messages" && h.Get("Anthropic-Version") == "" {
+			t.Fatalf("%s: missing anthropic-version", path)
+		}
+		// the model name is forwarded untouched: it names the Endpoint
+		if m, _ := got["model"].(string); m != "my-endpoint.us-west.modal.direct" {
+			t.Fatalf("%s: model rewritten to %q", path, m)
+		}
+		// the conversation is passed on as Modal's routing key, as our own
+		// fingerprint — never the client's raw session value
+		ak := h.Get("Modal-Routing-Affinity-Key")
+		if ak == "" {
+			t.Fatalf("%s: missing Modal-Routing-Affinity-Key", path)
+		}
+		if strings.Contains(ak, secretMarker) {
+			t.Fatal("affinity key leaked the prompt")
+		}
+	}
+
+	// every path keeps its /v1: Modal's inference host has no bare /chat or
+	// /models and answers 404 without the prefix
+	for path, want := range map[string]string{
+		"/v1/chat/completions": "/v1/chat/completions",
+		"/v1/responses":        "/v1/responses",
+		"/v1/messages":         "/v1/messages",
+	} {
+		mu.Lock()
+		h := seen[path]
+		mu.Unlock()
+		if h == nil {
+			t.Fatalf("%s never reached the upstream", path)
+		}
+		if path != want {
+			t.Fatalf("%s/%s mismatch", path, want)
+		}
+	}
+
+	// embeddings are not a Shared Endpoint path: refused locally, like River
+	before := e.up.callCount()
+	resp := e.post("/v1/embeddings", chat(false), nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("embeddings: status %d, want 404", resp.StatusCode)
+	}
+	if e.up.callCount() != before {
+		t.Fatal("embeddings reached the upstream")
+	}
+}
+
+// Modal refuses a token with 401 {"error":"invalid proxy auth credentials"};
+// the stock rule quarantines it, and a relay never sees the 401.
+func TestModalRefusedTokenQuarantines(t *testing.T) {
+	e := newEnv(t, []config.Account{
+		{ID: "m1", Provider: config.ProviderModal, Group: "modal", RuntimeKey: "wk-deadkey0000000000.ws-deadsecret"},
+	}, func(c *config.Config) {
+		c.Upstream.ModalBase = c.Upstream.RuntimeBase
+		c.ClientKeys = []config.ClientKey{{ID: "ck2", Group: "modal", KeyHash: config.HashKey("sk-odb-modal"), KeyPrefix: "x", Enabled: true}}
+	})
+	e.up.handle = func(w http.ResponseWriter, r *http.Request, key string, body map[string]any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		w.Write([]byte(`{"error":"invalid proxy auth credentials"}`))
+	}
+	e.key = "sk-odb-modal"
+	resp := e.post("/v1/chat/completions", chat(false), nil)
+	body := readAll(resp)
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status %d body %s", resp.StatusCode, body)
+	}
+	st := e.srv.pool.Views(e.srv.cfg.Get())["m1"].State
+	if st == nil || !st.HardQuarantined || st.RuleID != "modal-token-invalid" {
+		t.Fatalf("dead token not quarantined: %+v", st)
+	}
+}
+
+// A model that names no Endpoint of this token is the caller's mistake: the
+// 404 goes back as a request error and the account is not cooled down.
+func TestModalUnknownEndpointIsClientError(t *testing.T) {
+	e := newEnv(t, []config.Account{
+		{ID: "m1", Provider: config.ProviderModal, Group: "modal", RuntimeKey: "wk-abcdefghijkl0000.ws-secretvalue"},
+	}, func(c *config.Config) {
+		c.Upstream.ModalBase = c.Upstream.RuntimeBase
+		c.ClientKeys = []config.ClientKey{{ID: "ck2", Group: "modal", KeyHash: config.HashKey("sk-odb-modal"), KeyPrefix: "x", Enabled: true}}
+	})
+	e.up.handle = func(w http.ResponseWriter, r *http.Request, key string, body map[string]any) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":"unknown inference model"}`))
+	}
+	e.key = "sk-odb-modal"
+	resp := e.post("/v1/chat/completions", chat(false), nil)
+	body := readAll(resp)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Fatalf("status %d body %s", resp.StatusCode, body)
+	}
+	st := e.srv.pool.Views(e.srv.cfg.Get())["m1"].State
+	if st != nil && (st.HardQuarantined || !st.CooldownUntil.IsZero()) {
+		t.Fatalf("a wrong model name cooled the account down: %+v", st)
+	}
+}
+
+// A 429 from Modal is the model-wide concurrency limit: only that model cools
+// down, so the same token keeps serving other Endpoints.
+func TestModalConcurrencyLimitCoolsOneModel(t *testing.T) {
+	e := newEnv(t, []config.Account{
+		{ID: "m1", Provider: config.ProviderModal, Group: "modal", RuntimeKey: "wk-abcdefghijkl0000.ws-secretvalue"},
+	}, func(c *config.Config) {
+		c.Upstream.ModalBase = c.Upstream.RuntimeBase
+		c.ClientKeys = []config.ClientKey{{ID: "ck2", Group: "modal", KeyHash: config.HashKey("sk-odb-modal"), KeyPrefix: "x", Enabled: true}}
+	})
+	e.up.handle = func(w http.ResponseWriter, r *http.Request, key string, body map[string]any) {
+		if m, _ := body["model"].(string); m == "busy.modal.direct" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "9")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"error":"too many concurrent requests"}`))
+			return
+		}
+		writeOK(w, key)
+	}
+	e.key = "sk-odb-modal"
+	busy := chat(false)
+	busy["model"] = "busy.modal.direct"
+	if resp := e.post("/v1/chat/completions", busy, nil); resp.StatusCode != http.StatusTooManyRequests {
+		resp.Body.Close()
+		t.Fatalf("status %d, want the 429 passed on with its Retry-After", resp.StatusCode)
+	}
+	st := e.srv.pool.Views(e.srv.cfg.Get())["m1"].State
+	if st == nil {
+		t.Fatal("no account state")
+	}
+	if !st.CooldownUntil.IsZero() || st.HardQuarantined {
+		t.Fatalf("the account itself must stay usable: %+v", st)
+	}
+	ms := st.Models["busy.modal.direct"]
+	if ms == nil || ms.CooldownUntil.IsZero() {
+		t.Fatalf("model not cooled down: %+v", st.Models)
+	}
+	// another Endpoint of the same token still works
+	other := chat(false)
+	other["model"] = "idle.modal.direct"
+	if resp := e.post("/v1/chat/completions", other, nil); resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		t.Fatalf("other model: status %d", resp.StatusCode)
+	}
+}
+
+// The pool's base carries the /v1 the request paths hang off: a Modal request
+// to /v1/chat/completions must reach {modalBase}/chat/completions, never the
+// bare host Modal's proxy answers 404 on.
+func TestModalTargetKeepsVersionPrefix(t *testing.T) {
+	var got string
+	e := newEnv(t, []config.Account{
+		{ID: "m1", Provider: config.ProviderModal, Group: "modal", RuntimeKey: "wk-abcdefghijkl0000.ws-secretvalue"},
+	}, func(c *config.Config) {
+		c.Upstream.ModalBase = c.Upstream.RuntimeBase // the mock already ends in /v1
+		c.ClientKeys = []config.ClientKey{{ID: "ck2", Group: "modal", KeyHash: config.HashKey("sk-odb-modal"), KeyPrefix: "x", Enabled: true}}
+	})
+	e.up.handle = func(w http.ResponseWriter, r *http.Request, key string, body map[string]any) {
+		got = r.URL.Path
+		writeOK(w, key)
+	}
+	e.key = "sk-odb-modal"
+	resp := e.post("/v1/chat/completions", chat(false), nil)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	if got != "/v1/chat/completions" {
+		t.Fatalf("upstream path %q: the /v1 was dropped from the base", got)
+	}
+}
+
+// A Modal token that is only its Token ID is named as such in the console,
+// and the free test says why instead of relaying a 401 that reads like an
+// outage: Modal wants wk-<id>.ws-<secret>.
+func TestModalIncompleteTokenFlagged(t *testing.T) {
+	e := newEnv(t, []config.Account{
+		{ID: "m1", Provider: config.ProviderModal, Group: "modal", RuntimeKey: "wk-example0000000000"},
+		{ID: "m2", Provider: config.ProviderModal, Group: "modal", RuntimeKey: "wk-abcdefghijkl0000.ws-secretvalue"},
+	}, nil)
+	views := e.srv.accountViews(e.srv.cfg.Get())
+	got := map[string]bool{}
+	for _, v := range views {
+		got[v.ID] = v.TokenIncomplete
+	}
+	if !got["m1"] || got["m2"] {
+		t.Fatalf("tokenIncomplete = %v", got)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/accounts/m1/test", strings.NewReader(`{"inference":false}`))
+	req.SetPathValue("id", "m1")
+	rec := httptest.NewRecorder()
+	e.srv.apiTestAccount(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("test: %d", rec.Code)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	rt, _ := out["runtime"].(map[string]any)
+	msg, _ := rt["error"].(string)
+	if rt["ok"] != false || !strings.Contains(msg, "ws-") {
+		t.Fatalf("test result = %v", out)
+	}
+}
+
+// A Modal real-request test has no model name to guess: it uses the first
+// Endpoint of the account's own catalogue, and only says it can't when that
+// catalogue is unknown.
+func TestModalTestUsesCatalogueModel(t *testing.T) {
+	e := newEnv(t, []config.Account{
+		{ID: "m1", Provider: config.ProviderModal, Group: "modal", RuntimeKey: "wk-abcdefghijkl0000.ws-secretvalue"},
+	}, func(c *config.Config) {
+		c.Upstream.ModalBase = c.Upstream.RuntimeBase
+	})
+	var asked string
+	e.up.handle = func(w http.ResponseWriter, r *http.Request, key string, body map[string]any) {
+		if r.URL.Path == "/v1/models" {
+			w.Header().Set("Content-Type", "application/json")
+			w.Write([]byte(`{"data":[{"id":"zzz.modal.direct"},{"id":"aaa.modal.direct"}]}`))
+			return
+		}
+		asked, _ = body["model"].(string)
+		writeOK(w, key)
+	}
+	// learn the catalogue the way the poller does
+	if err := e.srv.quota.RefreshNow(context.Background(), e.srv.cfg.Get().Accounts[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	run := func() map[string]any {
+		req := httptest.NewRequest(http.MethodPost, "/api/accounts/m1/test", strings.NewReader(`{"inference":true}`))
+		req.SetPathValue("id", "m1")
+		rec := httptest.NewRecorder()
+		e.srv.apiTestAccount(rec, req)
+		var out map[string]any
+		if err := json.Unmarshal(rec.Body.Bytes(), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out
+	}
+	out := run()
+	if rt, _ := out["inference"].(map[string]any); rt["ok"] != true {
+		t.Fatalf("inference = %v", out["inference"])
+	}
+	// the catalogue's first entry, sorted: never a hard-coded model name
+	if asked != "aaa.modal.direct" {
+		t.Fatalf("model asked = %q", asked)
+	}
+
+	// with no catalogue read at all it refuses to guess instead of calling a
+	// model that does not exist
+	e.srv.quota.Forget("m1")
+	out = run()
+	rt, _ := out["inference"].(map[string]any)
+	if rt["ok"] != false || !strings.Contains(rt["error"].(string), "hostname") {
+		t.Fatalf("without a catalogue: %v", out["inference"])
+	}
 }

@@ -184,6 +184,41 @@ func DefaultOllamaErrorRules() []ErrorRule {
 	}
 }
 
+// DefaultModalErrorRules are Modal's Shared Endpoints
+// (docs/guide/shared-endpoints, docs/guide/endpoints): a proxy token that is
+// refused (401 "invalid proxy auth credentials"), a token without access to
+// the Endpoint or environment (403), a 402 for a workspace whose spend limit
+// or payment method ran out, a 429 from the model-wide concurrency limit, and
+// 5xx while a container is replaced or preempted. Shared Endpoints bill per
+// token from the workspace balance, and there is no control-plane endpoint
+// that reports it, so a balance refusal can only be learned from the error.
+//
+// A 404 "unknown inference model" is the caller's: the model field must be
+// the Endpoint's hostname, and a renamed or deleted Endpoint stays gone on
+// every account of the pool.
+func DefaultModalErrorRules() []ErrorRule {
+	return []ErrorRule{
+		{ID: "modal-token-invalid", Scope: ScopeAccount, Action: ActionHardQuarantine, DownstreamStatus: 502,
+			When: Match{Statuses: []int{401}},
+			Note: "Proxy Token 无效或已撤销（完整形态 wk-<id>.ws-<secret>，到 modal.com/settings/proxy-auth-tokens 核对），需人工处理（换 token 后点“恢复”）"},
+		{ID: "modal-token-forbidden", Scope: ScopeAccount, Action: ActionHardQuarantine, DownstreamStatus: 503,
+			When: Match{Statuses: []int{403}},
+			Note: "Token 无权访问该 Endpoint（或被环境 RBAC 限制）：需人工处理"},
+		{ID: "modal-insufficient-balance", Scope: ScopeAccount, Action: ActionCooldown, DownstreamStatus: 503,
+			When:  Match{Statuses: []int{402}, BodyContains: []string{"insufficient", "balance", "credit", "spend limit", "payment", "billing"}},
+			Reset: &Reset{Fallback: "10m", Max: "6h", Escalate: true},
+			Note:  "工作区余额不足 / 已到 spend limit：整号冷却，10 分钟起逐次翻倍，最长 6 小时，成功一次清零"},
+		{ID: "modal-concurrency-limited", Scope: ScopeModel, Action: ActionCooldown,
+			When:  Match{Statuses: []int{429}},
+			Reset: &Reset{Header: "Retry-After", Format: "retry-after", Fallback: "30s", Max: "10m"},
+			Note:  "该模型在所有 Shared Endpoint 间共享的并发上限打满（HTTP 429）：按 Retry-After 冷却，换号后继续"},
+		{ID: "modal-unavailable", Scope: ScopeAccount, Action: ActionCooldown,
+			When:  Match{Statuses: []int{500, 502, 503, 504}},
+			Reset: &Reset{Header: "Retry-After", Format: "retry-after", Fallback: "20s", Max: "5m"},
+			Note:  "容器被替换 / 抢占或冷启动中：短冷却后换号"},
+	}
+}
+
 // DefaultRetryRules stops switching on the statuses that mean "this request
 // is wrong", which no account change can fix. Each pool keeps its own list,
 // so one pool can be tuned without touching the others.
@@ -203,6 +238,14 @@ func DefaultRiverRetryRules() []RetryRule {
 // caller's, not the account's. (docs.ollama.com/api/errors)
 func DefaultOllamaRetryRules() []RetryRule {
 	return retryRulesFor("ollama-bad-request", "Ollama 认为请求本身有错（模型不存在、参数无效、体积超限），换号也没用",
+		400, 404, 413, 422)
+}
+
+// DefaultModalRetryRules are Modal's: a 404 is "unknown inference model" —
+// the model field names no Endpoint this token can see, which no other
+// account of the pool can fix either.
+func DefaultModalRetryRules() []RetryRule {
+	return retryRulesFor("modal-bad-request", "Modal 认为请求本身有错（model 不是本 token 可见的 Endpoint hostname、参数无效、体积超限），换号也没用",
 		400, 404, 413, 422)
 }
 

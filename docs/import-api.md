@@ -2,7 +2,7 @@
 
 `POST https://ods.yeschoy.io/open/v1/accounts/import`
 
-把 OpenDesign / River / Ollama 账号直接写入账号池。只用导入密钥 `sk-odbimp-…`（管理台「下游密钥 → 导入密钥」创建）。下游密钥 `sk-odb-…` 和管理员登录都不能调用。
+把 OpenDesign / River / Ollama / Modal 账号直接写入账号池。只用导入密钥 `sk-odbimp-…`（管理台「下游密钥 → 导入密钥」创建）。下游密钥 `sk-odb-…` 和管理员登录都不能调用。
 
 ```sh
 curl -X POST https://ods.yeschoy.io/open/v1/accounts/import \
@@ -19,11 +19,11 @@ curl -X POST https://ods.yeschoy.io/open/v1/accounts/import \
 
 | 字段 | 必填 | 约束 |
 |---|---|---|
-| `runtimeKey` | 是 | ≤ 512 字符。也接受字段名 `apiKey`、`key`。OpenDesign 形如 `sk-amr-…`、River 以 `rv_` 开头；Ollama 的 key 没有固定形态（自建服务填任意值如 `ollama`），此时必须带 `provider` |
-| `provider` | 否 | `opendesign` / `river` / `ollama`。不填时由 `runtimeKey` 的前缀推断（`sk-` / `rv_` / `oll-`），前缀识别不出的 key 才会用到它 |
-| `controlKey` | 否 | 只有 OpenDesign 有。有值时必须以 `vela_ctrl_` 开头，≤ 512 字符。有它才会自动刷新额度；River 和 Ollama 账号不能带 |
+| `runtimeKey` | 是 | ≤ 512 字符。也接受字段名 `apiKey`、`key`。OpenDesign 形如 `sk-amr-…`、River 以 `rv_` 开头、Modal 的 Proxy Token 以 `wk-` 开头且是完整形态 `wk-<id>.ws-<secret>`；Ollama 的 key 没有固定形态（自建服务填任意值如 `ollama`），此时必须带 `provider` |
+| `provider` | 否 | `opendesign` / `river` / `ollama` / `modal`。不填时由 `runtimeKey` 的前缀推断（`sk-` / `rv_` / `oll-` / `wk-`），前缀识别不出的 key 才会用到它 |
+| `controlKey` | 否 | 只有 OpenDesign 有。有值时必须以 `vela_ctrl_` 开头，≤ 512 字符。有它才会自动刷新额度；River、Ollama 和 Modal 账号不能带 |
 | `name` | 否 | ≤ 50 字符 |
-| `group` | 否 | 不填则用这把导入密钥的默认分组；默认分组是 `default` 时按号池改为 `river` / `ollama` |
+| `group` | 否 | 不填则用这把导入密钥的默认分组；默认分组是 `default` 时按号池改为 `river` / `ollama` / `modal` |
 | `note` | 否 | ≤ 400 字符。入池时会加上导入时间和密钥名 |
 | `proxyUrl` | 否 | `http` / `https` / `socks5` / `socks5h`，必须带 host，不能有空白 |
 
@@ -62,7 +62,7 @@ curl -X POST https://ods.yeschoy.io/open/v1/accounts/import \
 | 401 | 密钥缺失、错误或已停用 |
 | 429 | 同一 IP 鉴权连续失败 5 次，60 秒内拒绝。`Retry-After: 60` |
 
-单条失败示例：`{"index":0,"status":"error","name":"b2","error":"runtimeKey must start with sk-amr- (OpenDesign) or rv_ (River); an Ollama key has no prefix and needs \"provider\":\"ollama\""}`。常见 `error`：`runtimeKey is required`、`runtimeKey must start with …`、`provider must be opendesign, river or ollama`、`ollama accounts have no controlKey`、`controlKey must start with vela_ctrl_`、`name longer than 50`、`note longer than 400`、`proxyUrl …`、`暂存区已满（500 条），请先在管理台处理`。
+单条失败示例：`{"index":0,"status":"error","name":"b2","error":"runtimeKey must start with sk-amr- (OpenDesign), rv_ (River) or wk- (Modal); an Ollama key has no prefix and needs \"provider\":\"ollama\""}`。常见 `error`：`runtimeKey is required`、`runtimeKey must start with …`、`provider must be opendesign, river, ollama or modal`、`ollama accounts have no controlKey`、`controlKey must start with vela_ctrl_`、`name longer than 50`、`note longer than 400`、`proxyUrl …`、`暂存区已满（500 条），请先在管理台处理`。
 
 ## Ollama 示例
 
@@ -79,3 +79,19 @@ curl -X POST https://ods.yeschoy.io/open/v1/accounts/import \
 ```
 
 入池后账号进 `ollama` 组；下游密钥的分组填 `ollama` 才会调度到它们。
+
+## Modal 示例
+
+Modal 的 Proxy Token 以 `wk-` 开头，前缀就能识别出号池；显式写 `provider` 也可以。**必须是完整形态 `wk-<id>.ws-<secret>`**，只贴 `wk-<id>` 那段上游会回 401 `invalid proxy auth credentials`。Modal 没有控制密钥，也没有额度接口。
+
+```sh
+curl -X POST https://ods.yeschoy.io/open/v1/accounts/import \
+  -H 'Authorization: Bearer sk-odbimp-…' \
+  -H 'Content-Type: application/json' \
+  -d '{"accounts":[
+        {"runtimeKey":"wk-<id>.ws-<secret>","name":"modal-1"},
+        {"runtimeKey":"wk-<id>.ws-<secret>","provider":"modal","name":"modal-2","note":"团队B"}
+      ]}'
+```
+
+入池后账号进 `modal` 组；下游密钥的分组填 `modal` 才会调度到它们。调用时 `model` 填 Endpoint 的 hostname（如 `my-endpoint.us-west.modal.direct`），可用列表见该账号的 `/v1/models`。

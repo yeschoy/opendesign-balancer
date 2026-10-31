@@ -4,8 +4,11 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
+
+	"opendesign-balancer/internal/config"
 )
 
 // shapes as read from the real control plane on 2026-10-23
@@ -171,5 +174,105 @@ func TestOllamaBalance(t *testing.T) {
 	snap = &Snapshot{Ollama: &inc3, BalanceAt: now, AuthFailed: true}
 	if src, ex := snap.OllamaFunding(now, stale); src != "unknown" || ex {
 		t.Fatalf("failed read funding = %q %v", src, ex)
+	}
+}
+
+// A Modal account has no quota endpoint: only its token's /v1/models is read,
+// which on Modal is the set of Endpoints the token can reach (the request's
+// model field is an Endpoint's hostname). Nothing is guessed about balance.
+func TestModalReadsCatalogueOnly(t *testing.T) {
+	var paths []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.Path+"?"+r.Header.Get("Authorization"))
+		if r.Header.Get("Authorization") != "Bearer wk-abc.ws-def" {
+			w.WriteHeader(401)
+			w.Write([]byte(`{"error":"invalid proxy auth credentials"}`))
+			return
+		}
+		w.Write([]byte(`{"data":[{"id":"kimi.modal.direct"},{"id":"qwen.modal.direct"}]}`))
+	}))
+	defer srv.Close()
+
+	cfg := config.Default()
+	cfg.Quota.IntervalSec = 60
+	cfg.Upstream.ModalBase = srv.URL
+	a := config.Account{ID: "m1", Provider: config.ProviderModal, Group: "modal", RuntimeKey: "wk-abc.ws-def", Enabled: true}
+	cfg.Accounts = []config.Account{a} // the poller only stores a snapshot for a configured account
+	p := NewPoller(func() *config.Config { return cfg }, func(string) *http.Client { return srv.Client() })
+	if err := p.fetch(context.Background(), cfg, a); err != nil {
+		t.Fatal(err)
+	}
+	s := p.Get("m1")
+	if s == nil {
+		t.Fatal("no snapshot")
+	}
+	if len(s.Catalog) != 2 || !s.Catalog["kimi.modal.direct"] {
+		t.Fatalf("catalog = %v", s.Catalog)
+	}
+	if s.Ollama != nil || s.WalletUSD != "" || s.Eligible || len(s.Windows) != 0 {
+		t.Fatalf("modal must not report balances: %+v", s)
+	}
+	if s.LastOKAt.IsZero() || s.LastError != "" {
+		t.Fatalf("last read: %+v", s)
+	}
+	// only the catalogue was asked for, never a control-plane path
+	for _, pth := range paths {
+		if !strings.HasPrefix(pth, "/models?") {
+			t.Fatalf("unexpected upstream read %q", pth)
+		}
+	}
+	// the Endpoints are the models this account may call
+	if got := s.Models(time.Now()); len(got) != 2 {
+		t.Fatalf("models = %v", got)
+	}
+}
+
+// A refused Modal token is the one thing the free catalogue read can prove:
+// the inference host authenticates /v1/models, and its request paths answer
+// "unknown inference model" to a dead token too, so only this read separates
+// a bad token from a bad model name.
+func TestModalRefusedTokenMarksAuthFailed(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(401)
+		w.Write([]byte(`{"error":"invalid proxy auth credentials"}`))
+	}))
+	defer srv.Close()
+	cfg := config.Default()
+	cfg.Upstream.ModalBase = srv.URL
+	a := config.Account{ID: "m1", Provider: config.ProviderModal, Group: "modal", RuntimeKey: "wk-dead.ws-dead", Enabled: true}
+	cfg.Accounts = []config.Account{a}
+	p := NewPoller(func() *config.Config { return cfg }, func(string) *http.Client { return srv.Client() })
+	if err := p.fetch(context.Background(), cfg, a); err == nil {
+		t.Fatal("a refused token must be reported")
+	}
+	s := p.Get("m1")
+	if s == nil || !s.AuthFailed || s.Failures != 1 || s.LastError == "" {
+		t.Fatalf("snapshot = %+v", s)
+	}
+	if !s.NextAt.After(time.Now()) {
+		t.Fatalf("no backoff: %v", s.NextAt)
+	}
+}
+
+// A pool with no quota endpoint is fresh when its catalogue read is: that is
+// the only thing the poller asks for, so plan-window freshness would always
+// be false and the console would call good data stale.
+func TestModalCatalogFreshness(t *testing.T) {
+	now := time.Now()
+	s := &Snapshot{Catalog: map[string]bool{"e.modal.direct": true}, CatalogAt: now, LastOKAt: now}
+	if !s.FreshCatalog(now, 15*time.Minute) {
+		t.Fatal("a just-read catalogue must be fresh")
+	}
+	if s.Fresh(now, 15*time.Minute) {
+		t.Fatal("plan freshness needs plan windows, which Modal has none of")
+	}
+	if (&Snapshot{CatalogAt: now.Add(-time.Hour)}).FreshCatalog(now, 15*time.Minute) {
+		t.Fatal("an old catalogue must be stale")
+	}
+	// a refused token is never fresh, however recent the read
+	bad := &Snapshot{CatalogAt: now, AuthFailed: true}
+	if bad.FreshCatalog(now, 15*time.Minute) {
+		t.Fatal("a refused token must not count as fresh")
 	}
 }

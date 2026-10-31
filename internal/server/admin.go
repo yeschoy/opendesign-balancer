@@ -256,6 +256,9 @@ type accountView struct {
 	Quota         *quota.Snapshot `json:"quota"`
 	QuotaFresh    bool            `json:"quotaFresh"`
 	SharedWith    []string        `json:"sharedWorkspaceWith,omitempty"`
+	// TokenIncomplete flags a Modal proxy token that is only its Token ID:
+	// nothing reads with it, and every host says so with the same 401.
+	TokenIncomplete bool `json:"tokenIncomplete,omitempty"`
 	// Usage24h is what this pool sent the account in the last 24h — the only
 	// usage view of an account without a control key.
 	Usage24h stats.Bucket `json:"usage24h"`
@@ -281,12 +284,17 @@ func (s *Server) accountViews(cfg *config.Config) []accountView {
 		v := accountView{ID: a.ID, Provider: a.Provider, Name: a.Name, Email: a.Email, UserID: a.UserID, Note: a.Note, Group: a.Group, Enabled: a.Enabled,
 			RuntimeKey: config.Mask(a.RuntimeKey), ControlKey: config.Mask(a.ControlKey), HasControlKey: a.ControlKey != "",
 			MaxConcurrent: a.MaxConc, MaxRPM: a.MaxRPM, Weight: a.Weight, Priority: a.Priority,
-			HasProxy: a.ProxyURL != "", ProxyURL: maskProxy(a.ProxyURL), CreatedAt: a.CreatedAt, Runtime: views[a.ID], Usage24h: usage[a.ID]}
+			HasProxy: a.ProxyURL != "", ProxyURL: maskProxy(a.ProxyURL), CreatedAt: a.CreatedAt, Runtime: views[a.ID], Usage24h: usage[a.ID],
+			TokenIncomplete: a.Provider == config.ProviderModal && config.ModalTokenIncomplete(a.RuntimeKey)}
 		if q := snaps[a.ID]; q != nil && (q.WorkspaceID != "" || !q.PlanAt.IsZero() || q.LastError != "" || !q.CatalogAt.IsZero() || q.Ollama != nil) {
 			v.Quota = q
-			if a.Provider == config.ProviderOllama {
+			switch a.Provider {
+			case config.ProviderOllama:
 				v.QuotaFresh = q.FreshOllama(now, time.Duration(cfg.Quota.StaleSec)*time.Second)
-			} else {
+			case config.ProviderModal:
+				// no quota endpoint: the Endpoint catalogue is all that is read
+				v.QuotaFresh = q.FreshCatalog(now, time.Duration(cfg.Quota.StaleSec)*time.Second)
+			default:
 				v.QuotaFresh = q.Fresh(now, time.Duration(cfg.Quota.StaleSec)*time.Second)
 			}
 			for _, other := range byWS[q.WorkspaceID] {
@@ -476,7 +484,7 @@ func (s *Server) apiImportAccounts(w http.ResponseWriter, r *http.Request) {
 	}
 	declared := strings.TrimSpace(in.Provider)
 	if declared != "" && !config.KnownProvider(declared) {
-		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river, ollama or modal"))
 		return
 	}
 	rec := importRecord{Source: "console", Group: strings.TrimSpace(in.Group)}
@@ -603,6 +611,13 @@ func (s *Server) apiTestAccount(w http.ResponseWriter, r *http.Request) {
 	client := s.httpClient(a.ProxyURL)
 	out := map[string]any{}
 
+	if a.Provider == config.ProviderModal && config.ModalTokenIncomplete(a.RuntimeKey) {
+		// every Modal host answers a bare Token ID with a 401 whose wording
+		// names the fix, so say it here rather than let it read as an outage
+		out["runtime"] = map[string]any{"ok": false, "error": "Proxy Token 不完整：只有 wk-<id> 那段，Modal 要的是 wk-<id>.ws-<secret>（到 modal.com/settings/proxy-auth-tokens 复制完整值；老 token 的 secret 只在创建时显示一次，看不到就新建一个）"}
+		writeJSON(w, http.StatusOK, out)
+		return
+	}
 	t0 := time.Now()
 	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, cfg.RuntimeBase(a)+"/models", nil)
 	req.Header.Set("Authorization", "Bearer "+a.RuntimeKey)
@@ -645,6 +660,15 @@ func (s *Server) apiTestAccount(w http.ResponseWriter, r *http.Request) {
 				model = "deepseek-ai/DeepSeek-V4.1-Flash"
 			case config.ProviderOllama:
 				model = "gpt-oss:20b"
+			case config.ProviderModal:
+				// a Modal model is an Endpoint hostname that differs per
+				// workspace: the account's own catalogue is the only source
+				model = s.firstCatalogModel(a)
+				if model == "" {
+					out["inference"] = map[string]any{"ok": false, "error": "没有读到该 token 的 Endpoint 列表（/v1/models）：Modal 的模型名就是 Endpoint 的 hostname，无法猜默认值，请手动填写"}
+					writeJSON(w, http.StatusOK, out)
+					return
+				}
 			default:
 				model = "deepseek-v4.1-flash"
 			}
@@ -667,6 +691,17 @@ func (s *Server) apiTestAccount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
+}
+
+// firstCatalogModel is the first model an account's key could call, for a
+// pool whose model names can't be guessed (Modal's Endpoint hostnames).
+func (s *Server) firstCatalogModel(a config.Account) string {
+	ms := s.quota.View(a.ID).Models(time.Now())
+	if len(ms) == 0 {
+		return ""
+	}
+	sort.Strings(ms)
+	return ms[0]
 }
 
 // ---- device authorization: add an account by approving in its browser session ----
@@ -907,7 +942,7 @@ func (s *Server) apiCreateClientKey(w http.ResponseWriter, r *http.Request) {
 		provider = providerParam(r)
 	}
 	if provider != "" && !config.KnownProvider(provider) {
-		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river, ollama or modal"))
 		return
 	}
 	key := "sk-odb-" + randHex(24)
@@ -933,7 +968,7 @@ func (s *Server) apiUpdateClientKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Provider != nil && !config.KnownProvider(strings.TrimSpace(*in.Provider)) {
-		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river, ollama or modal"))
 		return
 	}
 	_, err := s.cfg.Update(-1, func(c *config.Config) error {
@@ -1037,6 +1072,8 @@ func (s *Server) apiSaveSettings(w http.ResponseWriter, r *http.Request) {
 			c.RiverErrorRules, c.RiverRetryRules = in.ErrorRules, in.RetryRules
 		case config.ProviderOllama:
 			c.OllamaErrorRules, c.OllamaRetryRules = in.ErrorRules, in.RetryRules
+		case config.ProviderModal:
+			c.ModalErrorRules, c.ModalRetryRules = in.ErrorRules, in.RetryRules
 		default:
 			c.ErrorRules, c.RetryRules = in.ErrorRules, in.RetryRules
 		}
@@ -1192,6 +1229,8 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 	// Ollama credits are per key (a team shares one balance, which this can't
 	// dedupe), so they are summed per account and reported apart
 	ollamaCredits, ollamaKnown := 0.0, 0
+	// Modal has no balances to add up, only the Endpoints each token reaches
+	modalEndpoints, modalKnown := 0, 0
 	for _, v := range views {
 		statusCount[v.Runtime.Status]++
 		groups[v.Group]++
@@ -1216,6 +1255,16 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 			if got {
 				ollamaKnown++
 			}
+			continue
+		}
+		// a Modal account has no plan windows or wallet: only its Endpoint
+		// catalogue is read, and that is summed apart below
+		if v.Provider == config.ProviderModal {
+			if !v.QuotaFresh {
+				continue
+			}
+			modalEndpoints += len(q.Models(now))
+			modalKnown++
 			continue
 		}
 		// the same workspace is counted once; failed or stale reads count nothing
@@ -1268,6 +1317,8 @@ func (s *Server) apiOverview(w http.ResponseWriter, r *http.Request) {
 		"walletAccounts": walletKnown,
 		"ollamaCredits":  ollamaCredits,
 		"ollamaAccounts": ollamaKnown,
+		"modalEndpoints": modalEndpoints,
+		"modalAccounts":  modalKnown,
 		"authFailed":     authFailed,
 		"workspaces":     len(seenWS),
 		"bindings":       s.pool.BindingCount(),

@@ -239,6 +239,12 @@ func (s *Snapshot) PaidPositive() bool {
 	return s.Summary != nil && (positiveCredits(s.Summary.RechargeCredits) || positiveCredits(s.Summary.RechargeCreditsUSD))
 }
 
+// FreshCatalog: the model list was read within stale, which for a pool with
+// no quota endpoint (Modal) is all there is to be fresh about.
+func (s *Snapshot) FreshCatalog(now time.Time, stale time.Duration) bool {
+	return s != nil && !s.AuthFailed && !s.CatalogAt.IsZero() && now.Sub(s.CatalogAt) < stale
+}
+
 // FreshOllama is the Ollama balance read within stale.
 func (s *Snapshot) FreshOllama(now time.Time, stale time.Duration) bool {
 	return s != nil && s.Ollama != nil && !s.AuthFailed && !s.BalanceAt.IsZero() && now.Sub(s.BalanceAt) < stale
@@ -568,7 +574,7 @@ func (p *Poller) dispatch(ctx context.Context) {
 
 // RefreshNow reads one account synchronously (admin button).
 func (p *Poller) RefreshNow(ctx context.Context, a config.Account) error {
-	if a.ControlKey == "" {
+	if a.ControlKey == "" || a.Provider == config.ProviderModal {
 		// only the catalogue (and, for Ollama, the balance) can be read
 		p.mu.Lock()
 		if s := p.snaps[a.ID]; s != nil {
@@ -591,8 +597,11 @@ func backoff(failures int) time.Duration {
 }
 
 func (p *Poller) fetch(ctx context.Context, cfg *config.Config, a config.Account) error {
-	if a.Provider == config.ProviderOllama {
+	switch a.Provider {
+	case config.ProviderOllama:
 		return p.fetchOllama(ctx, cfg, a)
+	case config.ProviderModal:
+		return p.fetchCatalogOnly(ctx, cfg, a)
 	}
 	client := &Client{Base: cfg.Upstream.ControlBase, HTTP: p.HTTPFor(a.ProxyURL)}
 	p.mu.Lock()
@@ -735,6 +744,53 @@ func (p *Poller) fetchOllama(ctx context.Context, cfg *config.Config, a config.A
 	s.LastOKAt, s.Failures, s.LastError = now, 0, ""
 	interval := max(time.Duration(cfg.Quota.IntervalSec)*time.Second, ollamaBalanceEvery)
 	s.NextAt = now.Add(interval)
+	p.store(a.ID, s)
+	return nil
+}
+
+// fetchCatalogOnly reads an account's model list and nothing else. Modal's
+// Shared Endpoints have no quota endpoint: usage is billed per token from the
+// workspace balance and only the dashboard shows it, so a refused balance
+// can only be learned from the error itself (a 402 on a request). What the
+// catalogue does tell us is which Endpoints this proxy token can reach: the
+// model field is an Endpoint's hostname, so /v1/models is the set of models
+// the key may call, and it costs nothing.
+func (p *Poller) fetchCatalogOnly(ctx context.Context, cfg *config.Config, a config.Account) error {
+	p.mu.Lock()
+	prev := p.snaps[a.ID].clone()
+	p.mu.Unlock()
+	s := prev
+	if s == nil {
+		s = &Snapshot{}
+	}
+	now := time.Now()
+	// The catalogue read is the only thing that can be asked of a Modal
+	// account, and on Modal it is also the only free check of the token: the
+	// inference host authenticates /v1/models (401 "invalid proxy auth
+	// credentials") while its request paths answer "unknown inference model"
+	// to a bad token as well, so a request can't tell a dead token from a
+	// wrong model name.
+	if a.RuntimeKey != "" && now.Sub(s.CatalogAt) >= catalogTTL {
+		cat, err := FetchCatalog(ctx, p.HTTPFor(a.ProxyURL), cfg.RuntimeBase(a), a.RuntimeKey)
+		switch {
+		case err == nil:
+			s.Catalog, s.CatalogAt, s.CatalogError, s.AuthFailed = cat, now, "", false
+		case IsAuth(err):
+			s.AuthFailed, s.CatalogError = true, err.Error()
+			s.LastError, s.LastErrorAt = err.Error(), now
+			s.Failures++
+			s.NextAt = now.Add(backoff(s.Failures))
+			p.store(a.ID, s)
+			return err
+		default:
+			s.CatalogError = err.Error() // the last good catalogue stays
+		}
+	}
+	s.LastOKAt = now
+	if !s.AuthFailed {
+		s.LastError = ""
+	}
+	s.NextAt = now.Add(max(time.Duration(cfg.Quota.IntervalSec)*time.Second, catalogTTL))
 	p.store(a.ID, s)
 	return nil
 }

@@ -1,6 +1,6 @@
 # opendesign-balancer
 
-OpenDesign 账号池代理。对下游（new-api 等中转站）提供一把 API 密钥和 OpenAI / Anthropic 兼容接口，把请求分发到一组上游账号上，负责选号、会话粘性、并发与 RPM 控制、额度轮询、错误处理和日志，并带一个 Web 管理台。除 OpenDesign 外，也支持 [River](https://docs.river.ai/) 与 [Ollama](https://docs.ollama.com/)（云端或自建）三个号池，各自独立分组、独立密钥、独立错误规则。
+OpenDesign 账号池代理。对下游（new-api 等中转站）提供一把 API 密钥和 OpenAI / Anthropic 兼容接口，把请求分发到一组上游账号上，负责选号、会话粘性、并发与 RPM 控制、额度轮询、错误处理和日志，并带一个 Web 管理台。除 OpenDesign 外，也支持 [River](https://docs.river.ai/)、[Ollama](https://docs.ollama.com/)（云端或自建）与 [Modal](https://modal.com/)（Shared Endpoint）号池，各自独立分组、独立密钥、独立错误规则。
 
 单个 Go 二进制，无外部依赖，无数据库。
 
@@ -46,11 +46,11 @@ docker compose up -d --build
 
 除 OpenDesign 外也支持 [River](https://docs.river.ai/) 的 API Key（`rv_` 开头）。上游 `https://api.river.ai/v1`（设置 `upstream.riverBase` 可改），OpenAI 兼容，`Authorization: Bearer rv_…`。
 
-- 账号的 `provider` 由运行密钥前缀自动决定：`rv_` → `river`，`oll-` → `ollama`，`sk-` → `opendesign`；手动添加、批量导入、开放导入接口都认 `rv_`。River 没有控制面，不能填控制密钥。
+- 账号的 `provider` 由运行密钥前缀自动决定：`rv_` → `river`，`oll-` → `ollama`，`wk-` → `modal`，`sk-` → `opendesign`；手动添加、批量导入、开放导入接口都认 `rv_`。River 没有控制面，不能填控制密钥。
 - **River 只支持 OpenAI Chat Completions 和 Responses**（`/v1/chat/completions`、`/v1/responses`、`/v1/models`）。River 号池收到 `/v1/messages`（Anthropic）等其他路径时，本地直接返回 404 `unsupported_endpoint`，不请求上游；Claude Code 这类 Anthropic 客户端不能接 River 池。
 - 额度未知，靠错误推断：River 的 402（余额不足）按“余额不足”规则逐次翻倍冷却，429 按 `Retry-After` 冷却，401 冷却后换号。**已有实例需在“路由设置”点“恢复默认规则”再保存**才有新增的 401/402 规则。
 - 每把 key 的 `/v1/models` 作为可用模型表，River 模型名形如 `deepseek-ai/DeepSeek-V4.1-Flash`。
-- **号池之间完全分开**：River 账号不指定分组时进 `river` 组、Ollama 账号进 `ollama` 组，OpenDesign 账号进 `default` 组；一个分组只能放同一种账号，混放会被拒绝保存。各池各建下游密钥（「下游密钥」页，分组分别填 `default` 和 `river`），密钥只调度本组账号，互不借号，用哪个池就给下游配哪把密钥（new-api 里建两个渠道）。导入密钥的默认分组为 `default` 时，`rv_` 账号自动进 `river`。
+- **号池之间完全分开**：River 账号不指定分组时进 `river` 组、Ollama 账号进 `ollama` 组、Modal 账号进 `modal` 组，OpenDesign 账号进 `default` 组；一个分组只能放同一种账号，混放会被拒绝保存。各池各建下游密钥（「下游密钥」页，分组分别填 `default` 和 `river`），密钥只调度本组账号，互不借号，用哪个池就给下游配哪把密钥（new-api 里建两个渠道）。导入密钥的默认分组为 `default` 时，`rv_` 账号自动进 `river`。
 - River 文档没有公布每 key 的并发/RPM 上限，需要时在账号上手设 `maxConcurrent` / `maxRpm`。
 
 ## Ollama 号池（ollama.com / 自建 ollama serve）
@@ -69,12 +69,37 @@ docker compose up -d --build
 - 冷却规则独立一套（`ollamaErrorRules`）：401 `invalid credentials` 隔离换 key，403 账号停用隔离，429 按 `Retry-After` 冷却，500/502/503/504 短暂冷却换号。已有实例需在「路由设置 → Ollama 号池」点「恢复默认规则」再保存。
 - `/v1/models` 原样透传：Ollama 云端的模型目录对所有 key 相同（换个错误 key 也返回 200），不能当套餐依据，所以不做按账号裁剪；自建服务的列表则是本机已 pull 的模型。
 - 分组：不指定分组时进 `ollama` 组，各池之间不混放。下游密钥填 `ollama` 分组（new-api 里再建一个 OpenAI/Claude 渠道指向本服务）。
-- **三个池在这四件事上完全独立**，互不借、互不回退：
-  - **号池**：`default` / `river` / `ollama` 三个分组各属一个池，一个分组只放同一种账号。自定义分组跟着第一把声明了池的密钥走，归属一旦确定就不能再改。
+- **每个池在这四件事上完全独立**（OpenDesign / River / Ollama / Modal 各一套），互不借、互不回退：
+  - **号池**：`default` / `river` / `ollama` / `modal` 四个分组各属一个池，一个分组只放同一种账号。自定义分组跟着第一把声明了池的密钥走，归属一旦确定就不能再改。
   - **下游密钥**：密钥自己记着 `provider`，所以池里还没有账号时它也不会漂到别的标签下；密钥只能在**自己池的分组**之间移动，想换池请新建密钥（`group "river" 属于 river 号池，这把密钥属于 ollama 号池` 这样的报错就是被拦下了）。
-  - **错误规则**：`errorRules` / `retryRules`、`riverErrorRules` / `riverRetryRules`、`ollamaErrorRules` / `ollamaRetryRules` 三套独立，设置页只读写当前标签的一套；三套默认值也各不相同（重试规则 id 分别是 `bad-request`、`river-bad-request`、`ollama-bad-request`）。改一个池的规则不会动到另外两个池。
+  - **错误规则**：`errorRules` / `retryRules`、`riverErrorRules` / `riverRetryRules`、`ollamaErrorRules` / `ollamaRetryRules`、`modalErrorRules` / `modalRetryRules` 各自独立，设置页只读写当前标签的一套；默认值也各不相同（重试规则 id 分别是 `bad-request`、`river-bad-request`、`ollama-bad-request`、`modal-bad-request`）。改一个池的规则不会动到其他池。
   - **导入记录**：每条记录记着自己导入进哪个池，`GET /api/import-log?provider=` 按池过滤，「下游密钥」页只显示当前标签那个池的记录。记录上限也按池算（每池最近 1000 条），一个池的导入刷屏不会把另一个池的历史挤掉。
 - 模型名带 tag，形如 `gpt-oss:20b`、`gemma4:31b`、`kimi-k2.7-code`；价格表按同样写法配置才会算费用。
+
+## Modal 号池（Shared Endpoints）
+
+支持 [Modal](https://modal.com/) 的 **Shared Endpoint**（[文档](https://modal.com/docs/guide/shared-endpoints)，[接入说明](https://modal.com/docs/guide/endpoint-integrations)）。上游 `https://inference.us-west.modal.direct/v1`（设置 `upstream.modalBase` 可改；只填到 `…modal.direct` 时启动会自动补 `/v1`，因为该 host 不带 `/v1` 一律 404）。
+
+**这个池和别的池不一样：所有模型共用一个 base URL，模型名就是 Endpoint 的 hostname。**
+
+| | 其他池 | Modal |
+|---|---|---|
+| 每个模型的 URL | 同一个 base | 同一个 base（`inference.<region>.modal.direct/v1`） |
+| `model` 字段 | 模型名，如 `claude-sonnet-5` | **Endpoint 的 hostname**，如 `my-endpoint.us-west.modal.direct` |
+| 能调哪些模型 | 服务商目录 | 该 token 能访问的 Endpoint（`GET /v1/models` 列出） |
+| 鉴权 | `Authorization: Bearer <key>` | `Authorization: Bearer wk-<id>.ws-<secret>` |
+
+- **Proxy Token 的完整形态是 `wk-<id>.ws-<secret>`，两段都要**。只贴 `wk-<id>` 那段（省略 `.ws-<secret>`）上游会回 401 `invalid proxy auth credentials`。Token 在 [modal.com/settings/proxy-auth-tokens](https://modal.com/settings/proxy-auth-tokens) 或 `modal workspace proxy-tokens create` 创建。账号按 `wk-` 前缀自动识别为 Modal，没有控制密钥（Modal 没有额度接口）。
+- **模型就是 hostname**：Endpoint 建好后控制台会给一个 hostname，把它填进客户端的模型名即可。取法：`curl "$MODAL_BASE/models" -H "Authorization: Bearer wk-…"`，返回就是该 token 能访问的 Endpoint 列表。本服务每 10 分钟读一次并缓存，不在列表里的模型不派给该账号（与 OpenDesign 的 catalog 机制一致；`ignoreCatalog` 同样能关掉）。
+- **三种协议都能接**：`/v1/chat/completions`、`/v1/responses`、`/v1/messages`（Claude Code 可直接接，anthropic 客户端漏传 `anthropic-version` 时补 `2023-06-01`）。`/v1/embeddings` 等 Shared Endpoint 没有的路径本地直接 404，不打上游。
+- **鉴权头只发 `Authorization`**，与 Ollama 同理，不附带 `x-api-key`。
+- **会话粘性顺带命中上游缓存**：Shared Endpoint 会把请求路由到「最可能缓存了该提示前缀」的容器，靠 `Modal-Routing-Affinity-Key` 头聚合一轮对话。本服务把**自己算出的会话指纹**（HMAC，不是原始会话值或提示词）塞进这个头，所以同一会话在 Modal 侧也会落到同一容器。该头只在上游发出，不影响下游客户端。
+- **额度**：Shared Endpoint 按 token 从工作区余额计费，**没有额度接口**（且套餐额度不能用于 Shared Endpoint）。本服务只在遇到 402 时冷却账号；要限量请用 Modal 的 [spend limits](https://modal.com/docs/guide/budgets#spend-limits)。概览页显示每个 token 的可用 Endpoint 数，不显示余额。
+- **最省成本的死活检查**：`/v1/models` 是唯一能免费判定 token 好坏的地方 —— 无效 token 回 401，完整 token 回它能访问的 Endpoint 列表。所以额度轮询把这里的 401 当作「token 失效」标记出来（按失败次数退避重读），而请求路径上的 404 一律当请求方写错模型名，不冷却账号。
+- **token 只填了一半的报错**：完整 token 是 `wk-<id>.ws-<secret>`。只填 `wk-<id>` 时 Modal 的每个 host、每条路径都回 401 `proxy auth required: … supply your proxy token as Bearer wk-<id>.ws-<secret>`，本服务会把它识别成「Token 不完整」并在账号列表里直接标出来，而不是当成上游故障。token secret 只在创建时显示一次，看不到就新建一个。
+- 实测（2026-10-31，一个 deepseek-v4-1-flash + 一个 kimi-k3 的 Shared Endpoint）：`/v1/chat/completions`、`/v1/responses`、`/v1/messages`、流式全部可用；`/v1/embeddings` 返回 404，所以本池不接。`/v1/models` 返回的每个 `id` 就是 Endpoint hostname，可直接当模型名用。
+- 错误规则独立一套（`modalErrorRules` / `modalRetryRules`，默认见下表）：token 失效 401 隔离、无权 403 隔离、402 余额不足整号冷却（10 分钟起翻倍）、429 按 `Retry-After` 冷却**该模型**（Shared Endpoint 的并发上限是按模型在整个工作区共享的，只有这个模型会 429）、5xx 短冷却换号；404 命中重试规则 `modal-bad-request`，停止换号、原样返回。已有实例升级后需在「路由设置 → Modal 号池」点「恢复默认规则」再保存。
+- 分组：不指定分组时进 `modal` 组，各池之间不混放；下游密钥填 `modal` 分组（new-api 里再建渠道，Base URL 填本服务地址，模型名填 Endpoint 的 hostname）。导入：开放接口传 `"provider":"modal"` 或直接用 `wk-` 开头的 key。
 
 ## 下游接口
 
@@ -84,7 +109,7 @@ docker compose up -d --build
 | `POST /v1/responses` | OpenAI Responses，原样转发 |
 | `POST /v1/messages` | Anthropic Messages，原样转发（错误按 Anthropic 格式返回） |
 | `POST /v1/*` | 其他 POST 同样转发 |
-| `GET /v1/models` | 上游模型列表，按分组缓存 10 分钟，并发请求合并为一次上游读取 |
+| `GET /v1/models` | 上游模型列表，按分组缓存 10 分钟，并发请求合并为一次上游读取（Modal 池里就是该 token 能访问的 Endpoint hostname） |
 | `POST /open/v1/accounts/import` | 开放导入接口（自动上号），用**导入密钥**鉴权，见下文 |
 
 鉴权：`Authorization: Bearer sk-odb-…` 或 `x-api-key`。响应头带 `X-Request-Id`（可在请求日志里查）和 `X-Attempts`。
@@ -207,6 +232,17 @@ new-api 打开“透传请求头”后，本服务按以下顺序识别会话，
 已部署的实例升级后，在“路由设置”点“恢复默认规则”再保存，才会换成新规则。
 
 `retryRules` 命中（默认 400/404/413/422）后立即停止换号，原样返回，避免一个用户的坏参数扩散成全池失败。但如果同一个响应已被错误规则判为账号问题（冷却或隔离），说明不是请求的错，照常换号：上游的 `model_limit_exceeded`、`tier_limit_exceeded` 都是 400。
+River / Ollama / Modal 三个池各有一套独立规则（`riverErrorRules`、`ollamaErrorRules`、`modalErrorRules` 与对应的 `*RetryRules`），默认值不同。Modal 池的默认错误规则：
+
+| 规则 | 匹配 | 动作 | 回下游 |
+|---|---|---|---|
+| `modal-token-invalid` | 401（`invalid proxy auth credentials`，token 不完整或已撤销） | 隔离账号（换 token 后点“恢复”） | 502 |
+| `modal-token-forbidden` | 403（token 无权访问该 Endpoint，或被环境 RBAC 限制） | 隔离账号 | 503 |
+| `modal-insufficient-balance` | 402（余额不足 / spend limit） | 整号冷却，10 分钟起逐次翻倍至 6 小时，成功清零 | 503 |
+| `modal-concurrency-limited` | 429 | **该模型**冷却（按 `Retry-After`，30 秒～10 分钟），换号 | 429 |
+| `modal-unavailable` | 500/502/503/504（容器被替换、抢占、冷启动） | 账号短冷却 | — |
+
+Modal 的 404 `unknown inference model` 不冷却账号，由重试规则 `modal-bad-request` 停止换号、原样返回：模型名写错在哪个账号上都是错的。
 
 ### 流式
 
@@ -224,7 +260,7 @@ new-api 打开“透传请求头”后，本服务按以下顺序识别会话，
 
 概览页的窗口剩余按工作区去重求和，多个账号属于同一工作区时只算一次，账号列表里会标“共享工作区”。
 
-上面这些只适用于 OpenDesign 号池。**River 没有额度接口**，只能靠 402/429 推断；**Ollama 有 `/api/balance`**：同一把 key 读自己的赠送额度（`included.balance_usd` / `allowance_usd` 与周期）、老套餐的 `session` / `weekly` 剩余百分比和已购额度 `purchased.balance_usd`，三项分开显示、不相加。判定“额度耗尽”的依据是赠送额度为 0（或周期已过）且已购额度为 0——读失败或超过 15 分钟未更新的快照一律按“未知”处理，不会排除账号。该接口每个用户每分钟限 10 次，同一账号两次读取至少间隔 30 秒。
+上面这些只适用于 OpenDesign 号池。**Modal 没有额度接口**：Shared Endpoint 按 token 从工作区余额计费（套餐额度不能用于 Shared Endpoint），余额只能在 Modal 控制台看，本服务只在遇到 402 时冷却账号；`/v1/models` 列的是该 token 能访问的 Endpoint，不能当余额依据。**River 没有额度接口**，只能靠 402/429 推断；**Ollama 有 `/api/balance`**：同一把 key 读自己的赠送额度（`included.balance_usd` / `allowance_usd` 与周期）、老套餐的 `session` / `weekly` 剩余百分比和已购额度 `purchased.balance_usd`，三项分开显示、不相加。判定“额度耗尽”的依据是赠送额度为 0（或周期已过）且已购额度为 0——读失败或超过 15 分钟未更新的快照一律按“未知”处理，不会排除账号。该接口每个用户每分钟限 10 次，同一账号两次读取至少间隔 30 秒。
 
 ### 只有 API Key 的账号
 
@@ -296,6 +332,9 @@ new-api 打开“透传请求头”后，本服务按以下顺序识别会话，
 - 设备授权的批准必须在目标账号已登录的浏览器里完成；本服务不接触 cookie。
 - 控制面读不到是否开了自动充值。开了自动充值、但窗口和各项额度都为 0 的账号会被判为额度耗尽而不调度。
 - `model_limit_exceeded`、`tier_limit_exceeded` 的正文格式来自官方客户端源码，尚未在本账号上真实触发过，见 [docs/upstream-findings.md](docs/upstream-findings.md)。
+- **Modal 没有额度接口**：工作区余额只能在 Modal 控制台看，本服务靠 402 推断冷却；`/v1/models` 返回的是 Endpoint 列表，不能当余额依据。
+- **Modal 的 404 不等于 token 失效**：请求路径上的 404 `unknown inference model` 只说明模型名不是本 token 可见的 Endpoint，token 好坏以额度轮询读 `/v1/models` 的结果为准。
+- Modal 的 `model` 是 Endpoint hostname，**换 Endpoint（改模型名）等于换模型**：价格表要按 hostname 配，否则不计费用。
 
 ## 回滚
 

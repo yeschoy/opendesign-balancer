@@ -329,7 +329,7 @@ func (s *Server) importOne(ik config.ImportKey, it importItem, now time.Time) im
 	name := strings.TrimSpace(it.Name)
 	group := strings.TrimSpace(it.Group)
 	if p := strings.TrimSpace(it.Provider); p != "" && !config.KnownProvider(p) {
-		return importResult{Status: "error", Name: name, Error: "provider must be opendesign, river or ollama"}
+		return importResult{Status: "error", Name: name, Error: "provider must be opendesign, river, ollama or modal"}
 	}
 	// the item's own provider wins, else the import key's pool (it names the
 	// pool its accounts join), else the key's prefix
@@ -349,7 +349,7 @@ func (s *Server) importOne(ik config.ImportKey, it importItem, now time.Time) im
 	case runtimeKey == "":
 		return fail("runtimeKey is required")
 	case !config.ValidRuntimeKeyFor(provider, runtimeKey) || len(runtimeKey) > 512:
-		return fail("runtimeKey must start with sk-amr- (OpenDesign) or rv_ (River); an Ollama key has no prefix and needs \"provider\":\"ollama\"")
+		return fail("runtimeKey must start with sk-amr- (OpenDesign), rv_ (River) or wk- (Modal); an Ollama key has no prefix and needs \"provider\":\"ollama\"")
 	case controlKey != "" && provider != config.ProviderOpenDesign:
 		return fail(provider + " accounts have no controlKey")
 	case controlKey != "" && (!strings.HasPrefix(controlKey, "vela_ctrl_") || len(controlKey) > 512):
@@ -612,7 +612,7 @@ func (s *Server) apiCreateImportKey(w http.ResponseWriter, r *http.Request) {
 		provider = providerParam(r)
 	}
 	if provider != "" && !config.KnownProvider(provider) {
-		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river, ollama or modal"))
 		return
 	}
 	key := importKeyPrefix + randHex(24)
@@ -638,7 +638,7 @@ func (s *Server) apiUpdateImportKey(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if in.Provider != nil && !config.KnownProvider(strings.TrimSpace(*in.Provider)) {
-		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river or ollama"))
+		apiError(w, http.StatusBadRequest, errors.New("provider must be opendesign, river, ollama or modal"))
 		return
 	}
 	_, err := s.cfg.Update(-1, func(c *config.Config) error {

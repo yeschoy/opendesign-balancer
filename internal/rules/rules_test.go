@@ -117,3 +117,44 @@ func TestEscalatingCooldown(t *testing.T) {
 		t.Fatalf("no escalation = %v", d)
 	}
 }
+
+// Modal's rules: a refused proxy token is the account's, a 429 is the model's
+// (Shared Endpoints share one concurrency limit per model across the whole
+// workspace), and an unknown Endpoint name is nobody's — the caller typed a
+// model that is not an Endpoint hostname.
+func TestModalErrorRules(t *testing.T) {
+	rs := DefaultModalErrorRules()
+	if err := ValidateErrorRules(rs); err != nil {
+		t.Fatalf("modal defaults do not validate: %v", err)
+	}
+	h := http.Header{}
+	h.Set("Retry-After", "17")
+
+	if r := MatchError(rs, 401, `{"error":"invalid proxy auth credentials"}`, http.Header{}); r == nil || r.ID != "modal-token-invalid" || r.Action != ActionHardQuarantine {
+		t.Fatalf("401 → %+v", r)
+	}
+	if r := MatchError(rs, 403, `{"error":"forbidden"}`, http.Header{}); r == nil || r.ID != "modal-token-forbidden" {
+		t.Fatalf("403 → %+v", r)
+	}
+	if r := MatchError(rs, 402, `{"error":"insufficient balance"}`, http.Header{}); r == nil || r.ID != "modal-insufficient-balance" {
+		t.Fatalf("402 → %+v", r)
+	}
+	// the shared concurrency limit is per model, so only that model cools down
+	r := MatchError(rs, 429, `{"error":"too many concurrent requests"}`, h)
+	if r == nil || r.ID != "modal-concurrency-limited" || r.Scope != ScopeModel {
+		t.Fatalf("429 → %+v", r)
+	}
+	if d := Cooldown(r, h, "", time.Now()); d != 17*time.Second {
+		t.Fatalf("429 cooldown %v, want Retry-After", d)
+	}
+	if r := MatchError(rs, 503, `{}`, http.Header{}); r == nil || r.ID != "modal-unavailable" {
+		t.Fatalf("503 → %+v", r)
+	}
+	// a wrong model name must not cool the account down
+	if r := MatchError(rs, 404, `{"error":"unknown inference model"}`, http.Header{}); r != nil {
+		t.Fatalf("404 cooled an account down: %+v", r)
+	}
+	if r := MatchRetry(DefaultModalRetryRules(), 404, `{"error":"unknown inference model"}`, http.Header{}); r == nil || r.ID != "modal-bad-request" {
+		t.Fatalf("404 must stop switching accounts")
+	}
+}

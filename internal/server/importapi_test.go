@@ -377,3 +377,60 @@ func TestImportLogEndpointFiltersByPool(t *testing.T) {
 		t.Fatalf("river must be empty: %+v", items)
 	}
 }
+
+// A Modal proxy token is recognized by its wk- prefix, so an import key of
+// the Modal pool needs no provider on every item — and the account lands in
+// the modal group with that token as its runtime key.
+func TestImportModalAccounts(t *testing.T) {
+	e := newImportEnv(t)
+	_, _ = e.srv.cfg.Update(-1, func(c *config.Config) error {
+		c.ImportKeys = append(c.ImportKeys,
+			config.ImportKey{ID: "ik-md", Name: "modal-bot", Group: "modal", Provider: config.ProviderModal,
+				KeyHash: config.HashKey("sk-odbimp-modal-key"), KeyPrefix: "x", Enabled: true})
+		return nil
+	})
+	// 1. the prefix alone is enough
+	st, body := e.openImport("sk-odbimp-modal-key", map[string]any{"runtimeKey": "wk-abc123.ws-secret456", "name": "modal-1"})
+	if st != 200 || body["added"] != float64(1) {
+		t.Fatalf("modal import: %d %v", st, body)
+	}
+	// 2. an explicit provider with a key the prefix doesn't name
+	if st, _ := e.openImport("sk-odbimp-modal-key", map[string]any{"runtimeKey": "wk-abc124.ws-secret457", "provider": "modal"}); st != 200 {
+		t.Fatalf("explicit modal import: %d", st)
+	}
+	cfg := e.srv.cfg.Get()
+	var got []config.Account
+	for _, a := range cfg.Accounts {
+		if a.Provider == config.ProviderModal {
+			got = append(got, a)
+		}
+	}
+	if len(got) != 2 {
+		t.Fatalf("modal accounts = %d", len(got))
+	}
+	for _, a := range got {
+		if a.Group != config.ModalGroup {
+			t.Fatalf("%s: group %q", a.ID, a.Group)
+		}
+		if a.ControlKey != "" {
+			t.Fatalf("%s: modal accounts have no control key", a.ID)
+		}
+		if !strings.HasPrefix(a.RuntimeKey, "wk-") {
+			t.Fatalf("%s: runtime key %q", a.ID, a.RuntimeKey)
+		}
+	}
+	// the import is filed under the modal pool, not another one's
+	recs := e.srv.imports.recent(10, config.ProviderModal)
+	if len(recs) != 2 || recs[0].Provider != config.ProviderModal {
+		t.Fatalf("modal import log: %+v", recs)
+	}
+	for _, p := range []string{config.ProviderOpenDesign, config.ProviderRiver, config.ProviderOllama} {
+		if recs := e.srv.imports.recent(10, p); len(recs) != 0 {
+			t.Fatalf("%s saw the modal import: %+v", p, recs)
+		}
+	}
+	// a control key is still refused for the pool
+	if st, _ := e.openImport("sk-odbimp-modal-key", map[string]any{"runtimeKey": "wk-abc125.ws-secret458", "controlKey": "vela_ctrl_x"}); st != 400 {
+		t.Fatalf("modal account with control key: %d, want 400", st)
+	}
+}
